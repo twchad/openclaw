@@ -52,6 +52,16 @@ describe("guard plugin", () => {
     expect(api.on).toHaveBeenCalledWith("before_tool_call", expect.any(Function));
     expect(api.on).toHaveBeenCalledWith("message_sending", expect.any(Function));
     expect(api.on).toHaveBeenCalledWith("gateway_start", expect.any(Function));
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      "guard_compile_scheme",
+      "guard_graph_read",
+      "guard_graph_save",
+      "guard_hold_release",
+      "guard_introspect",
+      "guard_simulate",
+      "guard_validate_rule",
+      "guard_validate_scheme",
+    ]);
     expect(httpRoutes.map((r) => r.path)).toContain("/guard/holds/:holdId/approve");
     expect(gatewayMethods).toContain("guard.hold.resolve");
     expect(commands.map((c) => c.name)).toContain("guard-approve");
@@ -78,6 +88,31 @@ describe("guard plugin", () => {
       block: true,
       blockReason: "Destructive action pattern detected. Use explicit approval.",
     });
+  });
+
+  it("returns immediately with holdId when guard creates a hold", async () => {
+    plugin.register(api as any);
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          authorized: false,
+          holdId: "hold_abc123",
+          violations: [{ reason: "Approval required for destructive action." }],
+          remediation: { message: "Awaiting human approval." },
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await hooks.before_tool_call(
+      { toolName: "bash", params: { command: "rm important.txt" } },
+      { agentId: "main", sessionKey: "agent:main:session:s1" },
+    );
+
+    expect(result.block).toBe(true);
+    expect(result.blockReason).toContain("hold_abc123");
+    expect(result.blockReason).toContain("guard_hold_release");
+    expect(result.blockReason).toContain("/guard-approve");
   });
 
   it("rewrites outbound content when output is denied", async () => {
@@ -113,51 +148,5 @@ describe("guard plugin", () => {
     );
     expect(result).toBeUndefined();
     expect(api.logger.warn).toHaveBeenCalledWith(expect.stringContaining("fail-open"));
-  });
-
-  it("suspends and allows when guard returns a holdId and human approves", async () => {
-    plugin.register(api as any);
-
-    // Guard returns pendingApproval with holdId
-    vi.mocked(globalThis.fetch).mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          authorized: false,
-          holdId: "hold_test123",
-          violations: [{ reason: "Approval required." }],
-          remediation: { message: "Awaiting human approval." },
-        }),
-        { status: 200 },
-      ),
-    );
-
-    // Simulate human approving after a short delay
-    const resultPromise = hooks.before_tool_call(
-      { toolName: "bash", params: { command: "rm important.txt" } },
-      { agentId: "main", sessionKey: "agent:main:session:s1" },
-    );
-
-    // Give the hook time to register the promise
-    await new Promise((r) => setTimeout(r, 10));
-
-    // Simulate the HTTP callback arriving (human approved via Guard UI)
-    // The HTTP route handler would resolve holdPromises["hold_test123"]
-    // We test this indirectly by triggering guard.hold.resolve gateway method
-    const gatewayResolveHandler = api.registerGatewayMethod.mock.calls.find(
-      ([method]) => method === "guard.hold.resolve",
-    )?.[1];
-
-    if (gatewayResolveHandler) {
-      await gatewayResolveHandler({
-        params: { holdId: "hold_test123", decision: "allow", resolvedBy: "test-human" },
-        respond: vi.fn(),
-        context: {
-          broadcast: vi.fn(),
-        },
-      });
-    }
-
-    const result = await resultPromise;
-    expect(result).toBeUndefined(); // allowed
   });
 });
