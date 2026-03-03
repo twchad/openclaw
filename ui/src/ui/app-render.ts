@@ -103,6 +103,7 @@ import { renderCommandPalette } from "./views/command-palette.ts";
 import { renderConfig } from "./views/config.ts";
 import { renderExecApprovalPrompt } from "./views/exec-approval.ts";
 import { renderGatewayUrlConfirmation } from "./views/gateway-url-confirmation.ts";
+import { renderGuard } from "./views/guard.ts";
 import { renderLoginGate } from "./views/login-gate.ts";
 import { renderOverview } from "./views/overview.ts";
 
@@ -904,6 +905,7 @@ export function renderApp(state: AppViewState) {
               }),
             )
           : nothing}
+        ${state.tab === "guard" ? renderGuard({ connected: state.connected }) : nothing}
         ${state.tab === "agents"
           ? lazyRender(lazyAgents, (m) =>
               m.renderAgents({

@@ -174,6 +174,11 @@ export const icons = {
       <path d="m4.9 4.9 2.9 2.9" />
     </svg>
   `,
+  shield: html`
+    <svg viewBox="0 0 24 24">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
+    </svg>
+  `,
 
   // Tool icons
   wrench: html`

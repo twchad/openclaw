@@ -1,0 +1,29 @@
+{
+  "id": "guard",
+  "name": "Guard",
+  "description": "Semantic authorization adapter for OpenClaw using Guard sidecar.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "endpoint": {
+        "type": "string",
+        "description": "Guard sidecar HTTP endpoint. Defaults to http://127.0.0.1:4517."
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "Decision request timeout in milliseconds. Default: 5000."
+      },
+      "mode": {
+        "type": "string",
+        "enum": ["observe", "enforce"],
+        "description": "Operating mode. observe logs but allows; enforce blocks violations."
+      },
+      "failurePolicy": {
+        "type": "string",
+        "enum": ["fail_open", "fail_closed"],
+        "description": "Behavior when Guard sidecar is unreachable. Default: fail_open."
+      }
+    }
+  }
+}
