@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { IncomingMessage } from "node:http";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 
@@ -56,30 +55,12 @@ type GuardDecisionResponse = {
   degraded?: boolean;
 };
 
-// ---------------------------------------------------------------------------
-// Hold types (mirror of Guard sidecar contracts)
-// ---------------------------------------------------------------------------
-
-type HoldDecision = "allow" | "deny";
-
-type HoldEntry = {
-  resolve: (decision: HoldDecision) => void;
-  reject: (err: Error) => void;
+type HoldReleaseResponse = {
+  released: boolean;
+  reason?: string;
+  newViolations?: GuardViolation[];
+  request?: GuardDecisionRequest;
 };
-
-const holdPromises = new Map<string, HoldEntry>();
-
-const HOLD_TIMEOUT_MS = Number(process.env.GUARD_HOLD_TIMEOUT_MS ?? "") || 300_000; // 5 minutes
-
-// Reads the full body of a Node IncomingMessage as a string.
-function readBody(req: IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
 
 function resolveConfig(
   api: OpenClawPluginApi,
@@ -426,6 +407,58 @@ function registerGuardTools(api: OpenClawPluginApi) {
     { optional: true },
   );
 
+  // guard_hold_release -----------------------------------------------------
+  api.registerTool(
+    {
+      name: "guard_hold_release",
+      label: "Guard Hold Release",
+      description:
+        "Release an approved Guard hold. Call this after the human has approved a held tool call. " +
+        "Returns the frozen original request so you can retry the exact same tool call. " +
+        "Guard will recognize the retry and allow it through without creating a new hold.",
+      parameters: {
+        type: "object",
+        properties: {
+          holdId: {
+            type: "string",
+            description: "The hold ID returned when the tool call was blocked.",
+          },
+        },
+        required: ["holdId"],
+        additionalProperties: false,
+      } as Record<string, unknown>,
+      execute: async (_toolCallId: string, params: unknown) => {
+        const input = params as { holdId?: string };
+        const holdId = input.holdId?.trim();
+        if (!holdId) return { ok: false, error: "holdId is required." };
+        const data = (await guardFetch(
+          api,
+          `/v1/holds/${holdId}/release`,
+          "POST",
+          {},
+        )) as HoldReleaseResponse | null;
+        if (!data) return { ok: false, error: "Guard unavailable or hold not found." };
+        if (!data.released) {
+          return {
+            ok: false,
+            error: data.reason ?? "Hold could not be released.",
+            newViolations: data.newViolations,
+          };
+        }
+        return {
+          ok: true,
+          released: true,
+          holdId,
+          originalRequest: data.request,
+          instructions:
+            "The hold has been released. Retry the EXACT same tool call now — " +
+            "Guard will recognize it as approved and allow it through.",
+        };
+      },
+    } as AnyAgentTool,
+    { optional: true },
+  );
+
   // guard_graph_read -------------------------------------------------------
   api.registerTool(
     {
@@ -464,8 +497,9 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
 
   // -------------------------------------------------------------------------
   // before_tool_call: evaluate every agent tool call against Guard.
-  // When Guard returns a holdId the agent fiber is suspended until the human
-  // approves or the hold TTL expires.
+  // Non-blocking: returns immediately with hold details so the agent can
+  // communicate them to the user. After human approval, the agent calls
+  // guard_hold_release then retries the exact tool call.
   // -------------------------------------------------------------------------
   api.on("before_tool_call", async (event, ctx) => {
     const decision = await callGuardDecision(api, {
@@ -486,38 +520,20 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
     if (decision.authorized === false) {
       if (decision.holdId) {
         const holdId = decision.holdId;
-        const violations = (decision.violations ?? []).map((v) => v.reason).join("; ");
-        api.logger.info?.(
-          `guard: hold ${holdId} created for ${event.toolName} — ` +
-            `awaiting human approval (timeout ${HOLD_TIMEOUT_MS / 1000}s). ` +
-            `Approve via Guard dashboard or /guard-approve ${holdId}. ` +
-            `Violations: ${violations}`,
-        );
-
-        // Hold the tool call in escrow. The Promise resolves when the human
-        // approves (via /guard-approve, the Guard UI, or gateway method).
-        // On approval the hook returns undefined → original call executes.
-        const holdDecision = await new Promise<HoldDecision>((resolve, reject) => {
-          holdPromises.set(holdId, { resolve, reject });
-          setTimeout(() => {
-            if (holdPromises.has(holdId)) {
-              holdPromises.delete(holdId);
-              reject(new Error("timeout"));
-            }
-          }, HOLD_TIMEOUT_MS);
-        }).catch(() => "deny" as HoldDecision);
-
-        if (holdDecision === "allow") {
-          api.logger.info?.(`guard: hold ${holdId} approved — releasing original tool call`);
-          return undefined;
-        }
+        const violations = (decision.violations ?? [])
+          .map((v) => v.reason)
+          .filter(Boolean)
+          .join("; ");
 
         return {
           block: true,
           blockReason:
-            `Guard approval hold ${holdId} was denied or expired after ${HOLD_TIMEOUT_MS / 1000}s. ` +
-            `The original ${event.toolName} call was not executed. ` +
-            `To retry, invoke the tool again — Guard will create a new hold for approval.`,
+            `Guard hold ${holdId} created — this ${event.toolName} call requires human approval. ` +
+            `Violations: ${violations || "policy violation detected"}. ` +
+            `The human can approve via the Guard dashboard at http://127.0.0.1:4520 ` +
+            `or by typing /guard-approve ${holdId} in any OpenClaw channel. ` +
+            `Once approved, call guard_hold_release with holdId "${holdId}" to get the frozen request, ` +
+            `then retry the EXACT same tool call — Guard will recognize it and allow it through.`,
         };
       }
 
@@ -559,77 +575,12 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
   });
 
   // -------------------------------------------------------------------------
-  // POST /guard/holds/:holdId/approve
-  // Receives approval forwarded from the Guard sidecar webhook or called
-  // directly by external systems. Proxies to the Guard sidecar and
-  // broadcasts a notification so connected UI clients can update.
-  // -------------------------------------------------------------------------
-  api.registerHttpRoute({
-    path: "/guard/holds/:holdId/approve",
-    handler: async (req, res) => {
-      if (req.method !== "POST") {
-        res.statusCode = 405;
-        res.end(JSON.stringify({ error: "method not allowed" }));
-        return;
-      }
-
-      const url = new URL(req.url ?? "/", "http://localhost");
-      const pathParts = url.pathname.split("/");
-      const holdId = pathParts[3] ?? "";
-
-      if (!holdId) {
-        res.statusCode = 400;
-        res.end(JSON.stringify({ error: "holdId required" }));
-        return;
-      }
-
-      let approvedBy = "http-callback";
-      try {
-        const body = await readBody(req);
-        const parsed = JSON.parse(body) as { approvedBy?: string };
-        if (parsed.approvedBy) approvedBy = parsed.approvedBy;
-      } catch {
-        // use default
-      }
-
-      // Forward to the Guard sidecar
-      const cfg = resolveConfig(api);
-      try {
-        await fetch(`${cfg.endpoint}/v1/holds/${holdId}/approve`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ approvedBy }),
-          signal: AbortSignal.timeout(cfg.timeoutMs),
-        });
-      } catch (err) {
-        api.logger.warn?.(`guard: sidecar approve failed for ${holdId}: ${String(err)}`);
-      }
-
-      // Resolve the in-flight Promise so the held tool call executes.
-      const entry = holdPromises.get(holdId);
-      if (entry) {
-        entry.resolve("allow");
-        holdPromises.delete(holdId);
-        api.logger.info?.(
-          `guard: hold ${holdId} approved via HTTP callback by ${approvedBy} — releasing tool call`,
-        );
-      } else {
-        api.logger.warn?.(`guard: HTTP callback for hold ${holdId} but no in-flight Promise found`);
-      }
-
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ ok: true, holdId }));
-    },
-  });
-
-  // -------------------------------------------------------------------------
   // gateway method: guard.hold.resolve
   // Called by the Guard UI dashboard or connected clients to approve/deny.
   // -------------------------------------------------------------------------
   api.registerGatewayMethod("guard.hold.resolve", async ({ params, respond, context }) => {
     const holdId = typeof params.holdId === "string" ? params.holdId : "";
-    const decision: HoldDecision = params.decision === "deny" ? "deny" : "allow";
+    const decision = params.decision === "deny" ? "deny" : "allow";
     const resolvedBy = typeof params.resolvedBy === "string" ? params.resolvedBy : "gateway-client";
 
     if (!holdId) {
@@ -650,13 +601,6 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
       api.logger.warn?.(`guard: sidecar hold ${action} failed: ${String(err)}`);
     }
 
-    // Resolve the in-flight Promise so the held tool call executes (or is denied).
-    const entry = holdPromises.get(holdId);
-    if (entry) {
-      entry.resolve(decision);
-      holdPromises.delete(holdId);
-    }
-
     context.broadcast("guard.hold.resolved", { holdId, decision, resolvedBy });
     respond(true, { ok: true, holdId, decision }, undefined);
   });
@@ -674,13 +618,12 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
       const rawArgs = (ctx.args ?? "").trim().split(/\s+/);
       const holdId = rawArgs[0] ?? "";
       const decisionArg = (rawArgs[1] ?? "allow").toLowerCase();
-      const decision: HoldDecision = decisionArg === "deny" ? "deny" : "allow";
+      const decision = decisionArg === "deny" ? "deny" : "allow";
 
       if (!holdId) {
         return { text: "Usage: /guard-approve <holdId> [allow|deny]" };
       }
 
-      // Tell the Guard sidecar.
       const cfg = resolveConfig(api);
       const action = decision === "allow" ? "approve" : "deny";
       try {
@@ -700,48 +643,11 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
         return { text: `Guard sidecar unreachable: ${String(err)}` };
       }
 
-      // Resolve the in-flight Promise so the held tool call executes (or is denied).
-      const entry = holdPromises.get(holdId);
-      if (entry) {
-        entry.resolve(decision);
-        holdPromises.delete(holdId);
-      }
-
       const verb = decision === "allow" ? "approved" : "denied";
       return {
-        text: `Guard hold ${holdId} ${verb}. The held tool call will ${decision === "allow" ? "now execute" : "not proceed"}.`,
+        text: `Guard hold ${holdId} ${verb}. The agent can now call guard_hold_release to get the frozen request and retry.`,
       };
     },
-  });
-
-  // -------------------------------------------------------------------------
-  // gateway_start: register this node's callback URL with the Guard sidecar
-  // so Guard can POST to us when a hold is created and the agent fiber needs
-  // to be suspended.
-  // -------------------------------------------------------------------------
-  api.on("gateway_start", async () => {
-    const cfg = resolveConfig(api);
-    // The callback URL uses a :holdId placeholder; Guard replaces it per hold.
-    const gatewayPort = process.env.OPENCLAW_PORT ?? process.env.PORT ?? "3000";
-    const callbackUrl = `http://127.0.0.1:${gatewayPort}/guard/holds/:holdId/approve`;
-
-    try {
-      const resp = await fetch(`${cfg.endpoint}/v1/config/callback`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ approvalCallbackUrl: callbackUrl }),
-        signal: AbortSignal.timeout(cfg.timeoutMs),
-      });
-      if (resp.ok) {
-        api.logger.info?.(`guard: registered approval callback URL: ${callbackUrl}`);
-      }
-    } catch {
-      // Guard may not be running yet — the GUARD_APPROVAL_CALLBACK_URL env var
-      // on the Guard sidecar is the fallback for pre-configured deployments.
-      api.logger.warn?.(
-        `guard: could not register approval callback (Guard sidecar not reachable). Set GUARD_APPROVAL_CALLBACK_URL on the sidecar as a fallback.`,
-      );
-    }
   });
 }
 
