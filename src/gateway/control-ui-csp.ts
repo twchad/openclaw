@@ -46,5 +46,6 @@ export function buildControlUiCspHeader(opts?: { inlineScriptHashes?: string[] }
     "img-src 'self' data: https:",
     "font-src 'self' https://fonts.gstatic.com",
     "connect-src 'self' ws: wss:",
+    "frame-src 'self' http://127.0.0.1:4520",
   ].join("; ");
 }

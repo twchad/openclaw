@@ -10,13 +10,6 @@ export function renderGuard(params: RenderGuardParams) {
   return html`
     <section class="guard-layout">
       <article class="card guard-card">
-        <header class="guard-card__header">
-          <h3>Guard Knowledge Graph</h3>
-          <p>
-            Guard shows user intent, generated ULID-backed graph nodes, and attached authorization
-            pieces with active mode state.
-          </p>
-        </header>
         ${
           !params.connected
             ? html`

@@ -14,6 +14,7 @@ import {
   browserAct,
   browserArmDialog,
   browserArmFileChooser,
+  browserConsoleMessages,
   browserCloseTab,
   browserFocusTab,
   browserNavigate,
@@ -39,6 +40,11 @@ import {
   trackSessionBrowserTab,
   untrackSessionBrowserTab,
 } from "./core-api.js";
+import {
+  browserPageErrors,
+  browserRequests,
+  browserResponseBody,
+} from "./browser/client-actions-observe.js";
 import { callGatewayTool } from "./core-api.js";
 
 const browserToolDeps = {
@@ -377,7 +383,7 @@ export function createBrowserTool(opts?: {
     label: "Browser",
     name: "browser",
     description: [
-      "Control the browser via OpenClaw's browser control server (status/start/stop/profiles/tabs/open/snapshot/screenshot/actions).",
+      "Control the browser via OpenClaw's browser control server (status/start/stop/profiles/tabs/open/snapshot/screenshot/actions/requests/errors/response).",
       "Browser choice: omit profile by default for the isolated OpenClaw-managed browser (`openclaw`).",
       'For the logged-in user browser on the local host, use profile="user". A supported Chromium-based browser (v144+) must be running. Use only when existing logins/cookies matter and the user is present.',
       'When a node-hosted browser proxy is available, the tool may auto-route to it. Pin a node with node=<id|name> or target="node".',
@@ -746,6 +752,80 @@ export function createBrowserTool(opts?: {
             profile,
             proxyRequest,
           });
+        }
+        case "requests": {
+          const targetId = readStringParam(params, "targetId");
+          const filter = readStringParam(params, "filter");
+          const clear = typeof params.clear === "boolean" ? params.clear : undefined;
+          if (proxyRequest) {
+            const result = await proxyRequest({
+              method: "GET",
+              path: "/requests",
+              profile,
+              query: { targetId, filter, clear },
+            });
+            return jsonResult(result);
+          }
+          return jsonResult(
+            await browserRequests(baseUrl, {
+              targetId: targetId ?? undefined,
+              filter: filter ?? undefined,
+              clear,
+              profile,
+            }),
+          );
+        }
+        case "errors": {
+          const targetId = readStringParam(params, "targetId");
+          const clear = typeof params.clear === "boolean" ? params.clear : undefined;
+          if (proxyRequest) {
+            const result = await proxyRequest({
+              method: "GET",
+              path: "/errors",
+              profile,
+              query: { targetId, clear },
+            });
+            return jsonResult(result);
+          }
+          return jsonResult(
+            await browserPageErrors(baseUrl, {
+              targetId: targetId ?? undefined,
+              clear,
+              profile,
+            }),
+          );
+        }
+        case "response": {
+          const urlParam = readStringParam(params, "url", { required: true });
+          const targetId = readStringParam(params, "targetId");
+          const { timeoutMs } = readOptionalTargetAndTimeout(params);
+          const maxChars =
+            typeof params.maxChars === "number" && Number.isFinite(params.maxChars)
+              ? Math.floor(params.maxChars)
+              : undefined;
+          if (proxyRequest) {
+            const result = await proxyRequest({
+              method: "POST",
+              path: "/response/body",
+              profile,
+              body: {
+                url: urlParam,
+                targetId,
+                timeoutMs,
+                maxChars,
+              },
+            });
+            return jsonResult(result);
+          }
+          return jsonResult(
+            await browserResponseBody(baseUrl, {
+              url: urlParam,
+              targetId: targetId ?? undefined,
+              timeoutMs,
+              maxChars,
+              profile,
+            }),
+          );
         }
         default:
           throw new Error(`Unknown action: ${action}`);
