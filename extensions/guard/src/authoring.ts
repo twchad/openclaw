@@ -380,6 +380,14 @@ When the helper requires database access, ML models, complex external API integr
 - When writing elaboration text for SEMANTICS rules, be specific and grounded. Avoid vague language.
 - When writing denyPattern for SYNTAX rules, test patterns against realistic tool arguments.
 - For SEQUENCE rules, verify the required tool order makes sense for the user's workflow.
+
+## Execution Style (Critical)
+
+- Be execution-first, not confirmation-first.
+- If the user request is actionable, call guard_* tools in the same turn. Do NOT stop at "I can do that" or "ready when you are."
+- Keep narration concise: brief status + concrete outcomes from tool calls.
+- Ask questions only when required information is genuinely missing.
+- Only request explicit confirmation immediately before guard_compile_scheme.
 `);
 
   if (params.mode === "edit" && params.scheme) {
@@ -442,6 +450,38 @@ type StreamCallback = (payload: {
 const AUTHORING_SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const AUTHORING_TIMEOUT_MS = 180_000; // 3 minutes per turn
+
+const AUTHORING_AUTO_CONTINUE_PROMPT = [
+  "Continue the previous authoring turn and execute the next concrete step now.",
+  "Use guard_* tools immediately; do not stop at intentions or confirmations.",
+  "Only ask for explicit confirmation right before guard_compile_scheme.",
+].join(" ");
+
+function shouldAutoContinueAuthoringTurn(params: {
+  toolCalls: number;
+  finalText: string;
+}): boolean {
+  if (params.toolCalls > 0) return false;
+  const text = params.finalText.trim();
+  if (!text) return true;
+  const lower = text.toLowerCase();
+  const stallSignals = [
+    "i'm ready",
+    "i am ready",
+    "once i have",
+    "once you provide",
+    "send me",
+    "fastest path",
+    "i don't have",
+    "i dont have",
+    "i need the schema",
+    "i need a sample payload",
+    "i can complete the flow",
+    "i'll complete",
+    "i will complete",
+  ];
+  return stallSignals.some((s) => lower.includes(s));
+}
 
 export class AuthoringSessionManager {
   private sessions = new Map<string, AuthoringSession>();
@@ -579,15 +619,18 @@ export class AuthoringSessionManager {
     const provider = primary ? primary.split("/")[0] : undefined;
     const model = primary ? primary.split("/").slice(1).join("/") : undefined;
 
-    let lastEmittedLength = 0;
+    const runSingleTurn = async (
+      prompt: string,
+    ): Promise<{ finalText: string; toolCalls: number }> => {
+      let lastEmittedLength = 0;
+      let toolCalls = 0;
 
-    try {
       const result = (await runAgent({
         sessionId: session.sessionId,
         sessionFile: session.sessionFile,
         workspaceDir: this.api.config?.agents?.defaults?.workspace ?? process.cwd(),
         config: this.api.config,
-        prompt: message,
+        prompt,
         extraSystemPrompt: systemPrompt,
         timeoutMs: AUTHORING_TIMEOUT_MS,
         runId: `guard-authoring-${Date.now()}`,
@@ -609,6 +652,7 @@ export class AuthoringSessionManager {
           const phase = evt.data.phase as string;
           const toolName = (evt.data.name as string) ?? "unknown";
           if (phase === "start") {
+            toolCalls += 1;
             onStream?.({
               type: "tool_call",
               data: { tool: toolName, args: evt.data.args ?? {} },
@@ -626,7 +670,6 @@ export class AuthoringSessionManager {
         },
       })) as Record<string, unknown>;
 
-      // Build final text from result payloads
       let finalText = "";
       const payloads = result.payloads as Array<{ text?: string; isError?: boolean }> | undefined;
       if (payloads) {
@@ -635,6 +678,22 @@ export class AuthoringSessionManager {
           .map((p) => p.text ?? "")
           .join("\n")
           .trim();
+      }
+
+      return { finalText, toolCalls };
+    };
+
+    try {
+      let { finalText, toolCalls } = await runSingleTurn(message);
+
+      if (
+        shouldAutoContinueAuthoringTurn({
+          toolCalls,
+          finalText,
+        })
+      ) {
+        const followUp = await runSingleTurn(AUTHORING_AUTO_CONTINUE_PROMPT);
+        finalText = followUp.finalText || finalText;
       }
 
       onStream?.({ type: "done", data: { text: finalText } });
