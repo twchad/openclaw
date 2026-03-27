@@ -695,7 +695,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
       name: "guard_introspect",
       label: "Guard Introspect",
       description:
-        "Get the full specification of all four Guard rule types (HARD, FUZZY, SEQUENCE, KNOWLEDGE_TEST) " +
+        "Get the full specification of current Guard rule types (SYNTAX, SEMANTICS, SEQUENCE, SEMANTICS_SEQUENCE, SENSITIVE_DATA, KNOWLEDGE_TEST) " +
         "including required fields, examples, composability matrix, and named composition patterns. " +
         "Call this once at the start of any policy-creation conversation to learn how to build rules. " +
         "Returns the agent's textbook for semantic authorization composition.",

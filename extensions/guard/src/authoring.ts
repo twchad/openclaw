@@ -308,6 +308,9 @@ Your available tools:
 - \`guard_helper_write_file\`: Write a file into a helper's directory (supporting modules, dependency manifests, data files).
 - \`guard_helper_install_deps\`: Install dependencies for a helper (npm install / pip install).
 
+Current canonical rule types are: SYNTAX, SEMANTICS, SEQUENCE, SEMANTICS_SEQUENCE, SENSITIVE_DATA, and KNOWLEDGE_TEST.
+Do NOT use legacy names like HARD or FUZZY.
+
 ## When to Use Helpers vs. Starlark Codegates
 
 **Use Starlark codegate (NOT a helper) for:**
