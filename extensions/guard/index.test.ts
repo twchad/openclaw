@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import register, { registerGuardPlugin } from "./index.js";
+import plugin, { registerGuardPlugin } from "./index.js";
 
 describe("guard plugin", () => {
   const hooks: Record<string, Function> = {};
@@ -45,7 +45,7 @@ describe("guard plugin", () => {
   });
 
   it("blocks before_tool_call when guard denies", async () => {
-    register(api as any);
+    plugin.register(api as any);
     vi.mocked(globalThis.fetch).mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -68,7 +68,7 @@ describe("guard plugin", () => {
   });
 
   it("rewrites outbound content when output is denied", async () => {
-    register(api as any);
+    plugin.register(api as any);
     vi.mocked(globalThis.fetch).mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -91,7 +91,7 @@ describe("guard plugin", () => {
   });
 
   it("fails open when sidecar is unavailable and fail_open active", async () => {
-    register(api as any);
+    plugin.register(api as any);
     vi.mocked(globalThis.fetch).mockRejectedValue(new Error("ECONNREFUSED"));
 
     const result = await hooks.before_tool_call(

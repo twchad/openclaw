@@ -79,15 +79,8 @@ export async function resolveAuthoringToolCatalog(
   // Resolve plugin tools for schemas
   let pluginToolEntries: ToolCatalogEntry[] = [];
   try {
-    const { resolvePluginTools } = (await import("../../../src/plugins/tools.js")) as {
-      resolvePluginTools: (params: Record<string, unknown>) => Array<{
-        name: string;
-        description?: string;
-        label?: string;
-        parameters?: unknown;
-      }>;
-    };
-    const pluginTools = resolvePluginTools({
+    const mod = await import("../../../src/plugins/tools.js");
+    const pluginTools = mod.resolvePluginTools({
       context: {
         config: api.config,
         workspaceDir: api.config?.agents?.defaults?.workspace ?? process.cwd(),
@@ -591,10 +584,8 @@ export class AuthoringSessionManager {
 
     // Verify guard_* tools are available as callable function tools (diagnostic)
     try {
-      const { resolvePluginTools } = (await import("../../../src/plugins/tools.js")) as {
-        resolvePluginTools: (params: Record<string, unknown>) => Array<{ name: string }>;
-      };
-      const pluginTools = resolvePluginTools({
+      const mod = await import("../../../src/plugins/tools.js");
+      const pluginTools = mod.resolvePluginTools({
         context: {
           config: this.api.config,
           workspaceDir: this.api.config?.agents?.defaults?.workspace ?? process.cwd(),
@@ -1020,112 +1011,116 @@ export function registerAuthoringHttpHandler(
 ) {
   const sseHub = new SSEHub();
 
-  api.registerHttpHandler(async (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? "/", "http://localhost");
-    if (!url.pathname.startsWith("/guard/authoring/")) return false;
+  api.registerHttpRoute({
+    path: "/guard/authoring/",
+    auth: "gateway",
+    match: "prefix",
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      const url = new URL(req.url ?? "/", "http://localhost");
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
-      res.end();
-      return true;
-    }
-
-    // GET /guard/authoring/events?sessionId=X -- SSE stream
-    if (url.pathname === "/guard/authoring/events" && req.method === "GET") {
-      const sessionId = url.searchParams.get("sessionId") ?? "";
-      if (!sessionId || !manager.getSession(sessionId)) {
-        jsonResponse(res, 404, { error: "Session not found" });
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        res.end();
         return true;
       }
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      });
-      res.write(":ok\n\n");
-      sseHub.subscribe(sessionId, res);
-      req.on("close", () => sseHub.unsubscribe(sessionId, res));
-      return true;
-    }
 
-    // POST /guard/authoring/start
-    if (url.pathname === "/guard/authoring/start" && req.method === "POST") {
-      try {
-        const raw = await readBody(req);
-        const body = raw ? JSON.parse(raw) : {};
-        const mode =
-          typeof body.mode === "string" && (body.mode === "create" || body.mode === "edit")
-            ? body.mode
-            : "create";
-        const intentId = typeof body.intentId === "string" ? body.intentId : undefined;
-        const result = await manager.startSession({ mode, intentId });
-        jsonResponse(res, 200, result);
-      } catch (err) {
-        jsonResponse(res, 500, { error: String(err) });
-      }
-      return true;
-    }
-
-    // POST /guard/authoring/message
-    if (url.pathname === "/guard/authoring/message" && req.method === "POST") {
-      try {
-        const raw = await readBody(req);
-        const body = raw ? JSON.parse(raw) : {};
-        const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
-        const message = typeof body.message === "string" ? body.message : "";
-
-        if (!sessionId || !message) {
-          jsonResponse(res, 400, { error: "sessionId and message are required" });
+      // GET /guard/authoring/events?sessionId=X -- SSE stream
+      if (url.pathname === "/guard/authoring/events" && req.method === "GET") {
+        const sessionId = url.searchParams.get("sessionId") ?? "";
+        if (!sessionId || !manager.getSession(sessionId)) {
+          jsonResponse(res, 404, { error: "Session not found" });
           return true;
         }
-
-        if (!manager.getSession(sessionId)) {
-          jsonResponse(res, 404, { error: "Session not found or expired" });
-          return true;
-        }
-
-        // Respond immediately, then process asynchronously via SSE
-        jsonResponse(res, 200, { ok: true });
-
-        const streamCallback: StreamCallback = (payload) => {
-          sseHub.push(sessionId, payload);
-        };
-
-        manager.sendMessage(sessionId, message, streamCallback).catch((err) => {
-          sseHub.push(sessionId, { type: "error", data: { error: String(err) } });
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
         });
-      } catch (err) {
-        jsonResponse(res, 500, { error: String(err) });
+        res.write(":ok\n\n");
+        sseHub.subscribe(sessionId, res);
+        req.on("close", () => sseHub.unsubscribe(sessionId, res));
+        return true;
       }
-      return true;
-    }
 
-    // POST /guard/authoring/cancel
-    if (url.pathname === "/guard/authoring/cancel" && req.method === "POST") {
-      try {
-        const raw = await readBody(req);
-        const body = raw ? JSON.parse(raw) : {};
-        const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
-
-        if (!sessionId) {
-          jsonResponse(res, 400, { error: "sessionId is required" });
-          return true;
+      // POST /guard/authoring/start
+      if (url.pathname === "/guard/authoring/start" && req.method === "POST") {
+        try {
+          const raw = await readBody(req);
+          const body = raw ? JSON.parse(raw) : {};
+          const mode =
+            typeof body.mode === "string" && (body.mode === "create" || body.mode === "edit")
+              ? body.mode
+              : "create";
+          const intentId = typeof body.intentId === "string" ? body.intentId : undefined;
+          const result = await manager.startSession({ mode, intentId });
+          jsonResponse(res, 200, result);
+        } catch (err) {
+          jsonResponse(res, 500, { error: String(err) });
         }
-
-        const ok = await manager.cancelSession(sessionId);
-        sseHub.removeAll(sessionId);
-        jsonResponse(res, 200, { ok, sessionId });
-      } catch (err) {
-        jsonResponse(res, 500, { error: String(err) });
+        return true;
       }
-      return true;
-    }
 
-    jsonResponse(res, 404, { error: "Not found" });
-    return true;
+      // POST /guard/authoring/message
+      if (url.pathname === "/guard/authoring/message" && req.method === "POST") {
+        try {
+          const raw = await readBody(req);
+          const body = raw ? JSON.parse(raw) : {};
+          const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+          const message = typeof body.message === "string" ? body.message : "";
+
+          if (!sessionId || !message) {
+            jsonResponse(res, 400, { error: "sessionId and message are required" });
+            return true;
+          }
+
+          if (!manager.getSession(sessionId)) {
+            jsonResponse(res, 404, { error: "Session not found or expired" });
+            return true;
+          }
+
+          // Respond immediately, then process asynchronously via SSE
+          jsonResponse(res, 200, { ok: true });
+
+          const streamCallback: StreamCallback = (payload) => {
+            sseHub.push(sessionId, payload);
+          };
+
+          manager.sendMessage(sessionId, message, streamCallback).catch((err) => {
+            sseHub.push(sessionId, { type: "error", data: { error: String(err) } });
+          });
+        } catch (err) {
+          jsonResponse(res, 500, { error: String(err) });
+        }
+        return true;
+      }
+
+      // POST /guard/authoring/cancel
+      if (url.pathname === "/guard/authoring/cancel" && req.method === "POST") {
+        try {
+          const raw = await readBody(req);
+          const body = raw ? JSON.parse(raw) : {};
+          const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+
+          if (!sessionId) {
+            jsonResponse(res, 400, { error: "sessionId is required" });
+            return true;
+          }
+
+          const ok = await manager.cancelSession(sessionId);
+          sseHub.removeAll(sessionId);
+          jsonResponse(res, 200, { ok, sessionId });
+        } catch (err) {
+          jsonResponse(res, 500, { error: String(err) });
+        }
+        return true;
+      }
+
+      jsonResponse(res, 404, { error: "Not found" });
+      return true;
+    },
   });
 }

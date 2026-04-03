@@ -140,5 +140,4 @@ export const BrowserToolSchema = Type.Object({
   request: Type.Optional(BrowserActSchema),
   filter: Type.Optional(Type.String()),
   clear: Type.Optional(Type.Boolean()),
-  url: Type.Optional(Type.String()),
 });

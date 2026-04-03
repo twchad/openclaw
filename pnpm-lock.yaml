@@ -407,6 +407,12 @@ importers:
 
   extensions/groq: {}
 
+  extensions/guard:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/huggingface: {}
 
   extensions/image-generation-core: {}
