@@ -808,6 +808,41 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
             enum: ["OBSERVE", "ENFORCE"],
             description: "OBSERVE logs but allows. ENFORCE blocks violations. Default: OBSERVE.",
           },
+          approvalRequired: {
+            type: "boolean",
+            description:
+              "If true, violations create approval holds instead of outright blocking. " +
+              "A human must approve or reject each held action within the approval window.",
+          },
+          approvalWindowSeconds: {
+            type: "number",
+            description:
+              "Seconds to wait for human approval before auto-expiring a hold. Default: 300 (5 minutes). " +
+              "Only relevant when approvalRequired is true.",
+          },
+          exceptions: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                exceptionId: { type: "string", description: "Unique exception identifier." },
+                description: {
+                  type: "string",
+                  description: "Human-readable description of when this exception applies.",
+                },
+                script: {
+                  type: "string",
+                  description:
+                    "Starlark script that returns True to exempt the action from the scheme. " +
+                    "Receives the same context as codegates (tool name, args, identity).",
+                },
+              },
+              required: ["exceptionId", "script"],
+            },
+            description:
+              "Scheme-level exceptions (Starlark codegates that exempt actions from ALL rules). " +
+              "Use for blanket overrides like admin bypass or test-mode exemptions.",
+          },
         },
         required: ["intentId", "graphId", "rules"],
         additionalProperties: false,
@@ -818,16 +853,164 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
           graphId?: string;
           rules?: unknown[];
           mode?: string;
+          approvalRequired?: boolean;
+          approvalWindowSeconds?: number;
+          exceptions?: unknown[];
         };
         if (!input.intentId || !input.graphId || !input.rules) {
           return jsonResult({ ok: false, error: "intentId, graphId, and rules are required." });
         }
-        const data = await guardFetch(api, "/v1/schemes/compile", "POST", {
+        const payload: Record<string, unknown> = {
           intentId: input.intentId,
           graphId: input.graphId,
           rules: input.rules,
           mode: input.mode ?? "OBSERVE",
-        });
+        };
+        if (input.approvalRequired != null) payload.approvalRequired = input.approvalRequired;
+        if (input.approvalWindowSeconds != null)
+          payload.approvalWindowSeconds = input.approvalWindowSeconds;
+        if (input.exceptions) payload.exceptions = input.exceptions;
+        const data = await guardFetch(api, "/v1/schemes/compile", "POST", payload);
+        if (!data) return jsonResult({ ok: false, error: "Guard unavailable." });
+        return jsonResult({ ok: true, result: data });
+      },
+    } as AnyAgentTool,
+    { optional: true },
+  );
+
+  // guard_scheme_update -----------------------------------------------------
+  api.registerTool(
+    {
+      name: "guard_scheme_update",
+      label: "Guard Scheme Update",
+      description:
+        "Update an existing scheme with partial changes instead of recompiling the entire scheme. " +
+        "Send only the delta: scheme-level patches (mode, approvalRequired, approvalWindowSeconds, " +
+        "knowledgeTest, exceptions) and/or rule mutations (updateRules by ruleId, addRules, " +
+        "removeRuleIds). The server reads the current scheme, applies patches, runs full validation " +
+        "+ lint + smoke test, and creates a new versioned scheme. Use this for all modifications " +
+        "after initial compilation. Use guard_compile_scheme only for the first scheme creation.",
+      parameters: {
+        type: "object",
+        properties: {
+          schemeId: {
+            type: "string",
+            description: "Target scheme ID. Optional if intentId is provided.",
+          },
+          intentId: {
+            type: "string",
+            description: "Target intent ID — resolves to the active scheme for this intent.",
+          },
+          mode: {
+            type: "string",
+            enum: ["OBSERVE", "ENFORCE"],
+            description: "Set scheme mode. Omit to keep current.",
+          },
+          approvalRequired: {
+            type: "boolean",
+            description: "Set whether violations require human approval. Omit to keep current.",
+          },
+          approvalWindowSeconds: {
+            type: "number",
+            description: "Set approval timeout in seconds. Omit to keep current.",
+          },
+          knowledgeTest: {
+            type: "object",
+            properties: {
+              question: { type: "string", description: "Question the agent must answer." },
+              expectedAnswer: { type: "string", description: "Expected answer." },
+              threshold: { type: "number", description: "Similarity threshold (0-1)." },
+              maxRetries: { type: "number", description: "Max retry attempts." },
+            },
+            description:
+              "Set or replace the scheme-level knowledge test gate. Omit to keep current.",
+          },
+          exceptions: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                exceptionId: { type: "string" },
+                description: { type: "string" },
+                script: { type: "string" },
+              },
+              required: ["exceptionId", "script"],
+            },
+            description: "Replace scheme exceptions. Omit to keep current.",
+          },
+          updateRules: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                ruleId: { type: "string", description: "ID of the rule to patch (required)." },
+                title: { type: "string", description: "New title. Omit to keep current." },
+                description: {
+                  type: "string",
+                  description: "New description. Omit to keep current.",
+                },
+                scope: { type: "string", description: "New scope. Omit to keep current." },
+                enabled: {
+                  type: "boolean",
+                  description: "Enable/disable rule. Omit to keep current.",
+                },
+                syntax: {
+                  type: "object",
+                  properties: {
+                    denyPattern: { type: "array", items: { type: "string" } },
+                    toolFilter: { type: "array", items: { type: "string" } },
+                  },
+                  description: "Patch SYNTAX config fields. Omit fields to keep current.",
+                },
+                semantics: {
+                  type: "object",
+                  properties: {
+                    elaborations: { type: "array", items: { type: "string" } },
+                    threshold: { type: "number" },
+                    toolFilter: { type: "array", items: { type: "string" } },
+                    contentTypes: { type: "array", items: { type: "string" } },
+                    benignCorpus: { type: "array", items: { type: "string" } },
+                  },
+                  description: "Patch SEMANTICS config fields. Omit fields to keep current.",
+                },
+                sequence: { type: "object", description: "Replace entire SEQUENCE config." },
+                semanticsSequence: {
+                  type: "object",
+                  description: "Replace entire SEMANTICS_SEQUENCE config.",
+                },
+                sensitiveData: {
+                  type: "object",
+                  description: "Replace entire SENSITIVE_DATA config.",
+                },
+                codeGate: { type: "object", description: "Replace entire codeGate config." },
+                knowledgeTest: {
+                  type: "object",
+                  description: "Replace entire knowledgeTest config.",
+                },
+              },
+              required: ["ruleId"],
+            },
+            description: "Patch existing rules by ruleId. Only provided fields are changed.",
+          },
+          addRules: {
+            type: "array",
+            items: { type: "object" },
+            description: "New RuleSpec entries to append to the scheme.",
+          },
+          removeRuleIds: {
+            type: "array",
+            items: { type: "string" },
+            description: "Rule IDs to remove from the scheme.",
+          },
+        },
+        additionalProperties: false,
+      } as Record<string, unknown>,
+      execute: async (_toolCallId: string, params: unknown) => {
+        const input = params as Record<string, unknown>;
+        if (!input.intentId && !input.schemeId) {
+          return jsonResult({ ok: false, error: "schemeId or intentId is required." });
+        }
+        const data = await guardFetch(api, "/v1/schemes/update", "POST", input);
         if (!data) return jsonResult({ ok: false, error: "Guard unavailable." });
         return jsonResult({ ok: true, result: data });
       },
@@ -1305,6 +1488,29 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
         const data = await guardFetch(api, `/v1/graphs/${encodeURIComponent(graphId)}`, "GET");
         if (!data) return jsonResult({ ok: false, error: "Graph not found or Guard unavailable." });
         return jsonResult({ ok: true, graph: data });
+      },
+    } as AnyAgentTool,
+    { optional: true },
+  );
+
+  // guard_graph_list --------------------------------------------------------
+  api.registerTool(
+    {
+      name: "guard_graph_list",
+      label: "Guard Graph List",
+      description:
+        "List all Guard intent knowledge graphs. Returns an array of graphs with their " +
+        "graphId, intentId, intentText, modeState, and node/edge counts. " +
+        "Use this to discover existing intents when no specific graphId or intentId is known.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      } as Record<string, unknown>,
+      execute: async () => {
+        const data = await guardFetch(api, "/v1/graphs", "GET");
+        if (!data) return jsonResult({ ok: false, error: "Guard unavailable." });
+        return jsonResult({ ok: true, graphs: data });
       },
     } as AnyAgentTool,
     { optional: true },
