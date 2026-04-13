@@ -99,6 +99,11 @@ export type RunEmbeddedPiAgentParams = {
   bootstrapContextRunKind?: "default" | "heartbeat" | "cron";
   /** Optional tool allow-list; when set, only these tools are sent to the model. */
   toolsAllow?: string[];
+  /**
+   * Extra entries merged into the plugin tool allowlist for this embedded run only.
+   * Used for dedicated runners (e.g. Guard scheme authoring needs `group:guard-authoring`).
+   */
+  pluginToolAllowlistExtras?: string[];
   /** Seen bootstrap truncation warning signatures for this session (once mode dedupe). */
   bootstrapPromptWarningSignaturesSeen?: string[];
   /** Last shown bootstrap truncation warning signature for this session. */

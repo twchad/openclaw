@@ -297,6 +297,11 @@ export function createOpenClawCodingTools(options?: {
   senderIsOwner?: boolean;
   /** Callback invoked when sessions_yield tool is called. */
   onYield?: (message: string) => Promise<void> | void;
+  /**
+   * Extra entries merged into the plugin tool allowlist for this run (e.g.
+   * `group:guard-authoring` so embedded Guard scheme authoring can see authoring-only tools).
+   */
+  pluginToolAllowlistExtras?: string[];
 }): AnyAgentTool[] {
   const execToolName = "exec";
   const sandbox = options?.sandbox?.enabled ? options.sandbox : undefined;
@@ -545,17 +550,20 @@ export function createOpenClawCodingTools(options?: {
         : undefined,
       sandboxed: !!sandbox,
       config: options?.config,
-      pluginToolAllowlist: collectExplicitAllowlist([
-        profilePolicy,
-        providerProfilePolicy,
-        globalPolicy,
-        globalProviderPolicy,
-        agentPolicy,
-        agentProviderPolicy,
-        groupPolicy,
-        sandboxToolPolicy,
-        subagentPolicy,
-      ]),
+      pluginToolAllowlist: [
+        ...collectExplicitAllowlist([
+          profilePolicy,
+          providerProfilePolicy,
+          globalPolicy,
+          globalProviderPolicy,
+          agentPolicy,
+          agentProviderPolicy,
+          groupPolicy,
+          sandboxToolPolicy,
+          subagentPolicy,
+        ]),
+        ...(options?.pluginToolAllowlistExtras ?? []),
+      ],
       currentChannelId: options?.currentChannelId,
       currentThreadTs: options?.currentThreadTs,
       currentMessageId: options?.currentMessageId,

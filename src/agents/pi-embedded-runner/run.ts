@@ -565,6 +565,7 @@ export async function runEmbeddedPiAgent(
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature:
               bootstrapPromptWarningSignaturesSeen[bootstrapPromptWarningSignaturesSeen.length - 1],
+            pluginToolAllowlistExtras: params.pluginToolAllowlistExtras,
           });
 
           const {

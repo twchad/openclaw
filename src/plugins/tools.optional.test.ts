@@ -5,6 +5,7 @@ type MockRegistryToolEntry = {
   optional: boolean;
   source: string;
   factory: (ctx: unknown) => unknown;
+  optionalRequiresAllowlistToken?: string;
 };
 
 const loadOpenClawPluginsMock = vi.fn();
@@ -241,6 +242,48 @@ describe("resolvePluginTools optional tools", () => {
     const tools = resolveOptionalDemoTools(toolAllowlist);
 
     expectResolvedToolNames(tools, ["optional_tool"]);
+  });
+
+  it("does not allow optional tools with optionalRequiresAllowlistToken via group:plugins alone", () => {
+    setRegistry([
+      {
+        pluginId: "optional-demo",
+        optional: true,
+        source: "/tmp/optional-demo.js",
+        factory: () => makeTool("optional_tool"),
+        optionalRequiresAllowlistToken: "group:guard-authoring",
+      },
+    ]);
+    const tools = resolveOptionalDemoTools(["group:plugins"]);
+    expect(tools).toHaveLength(0);
+  });
+
+  it("allows optional tools with optionalRequiresAllowlistToken when token is on the allowlist", () => {
+    setRegistry([
+      {
+        pluginId: "optional-demo",
+        optional: true,
+        source: "/tmp/optional-demo.js",
+        factory: () => makeTool("optional_tool"),
+        optionalRequiresAllowlistToken: "group:guard-authoring",
+      },
+    ]);
+    const tools = resolveOptionalDemoTools(["group:plugins", "group:guard-authoring"]);
+    expectResolvedToolNames(tools, ["optional_tool"]);
+  });
+
+  it("does not allow restricted optional tools via plugin id allowlist", () => {
+    setRegistry([
+      {
+        pluginId: "optional-demo",
+        optional: true,
+        source: "/tmp/optional-demo.js",
+        factory: () => makeTool("optional_tool"),
+        optionalRequiresAllowlistToken: "group:guard-authoring",
+      },
+    ]);
+    const tools = resolveOptionalDemoTools(["optional-demo"]);
+    expect(tools).toHaveLength(0);
   });
 
   it("rejects plugin id collisions with core tool names", () => {

@@ -150,6 +150,14 @@ export type OpenClawPluginToolOptions = {
   name?: string;
   names?: string[];
   optional?: boolean;
+  /**
+   * When `optional` is true, optional tools normally unlock if the tool allowlist
+   * contains the tool name, the plugin id, or `group:plugins`. If set, the allowlist
+   * must contain this token (e.g. `group:guard-authoring`) or the individual tool
+   * name. Plugin id and `group:plugins` do not unlock these tools — use for
+   * high-risk plugin surfaces that only dedicated runners should enable.
+   */
+  optionalRequiresAllowlistToken?: string;
 };
 
 export type OpenClawPluginHookOptions = {

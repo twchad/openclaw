@@ -76,6 +76,8 @@ export type PluginToolRegistration = {
   factory: OpenClawPluginToolFactory;
   names: string[];
   optional: boolean;
+  /** See OpenClawPluginToolOptions.optionalRequiresAllowlistToken */
+  optionalRequiresAllowlistToken?: string;
   source: string;
   rootDir?: string;
 };
@@ -291,10 +293,16 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
   const registerTool = (
     record: PluginRecord,
     tool: AnyAgentTool | OpenClawPluginToolFactory,
-    opts?: { name?: string; names?: string[]; optional?: boolean },
+    opts?: {
+      name?: string;
+      names?: string[];
+      optional?: boolean;
+      optionalRequiresAllowlistToken?: string;
+    },
   ) => {
     const names = opts?.names ?? (opts?.name ? [opts.name] : []);
     const optional = opts?.optional === true;
+    const optionalRequiresAllowlistToken = opts?.optionalRequiresAllowlistToken?.trim();
     const factory: OpenClawPluginToolFactory =
       typeof tool === "function" ? tool : (_ctx: OpenClawPluginToolContext) => tool;
 
@@ -312,6 +320,9 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       factory,
       names: normalized,
       optional,
+      ...(optionalRequiresAllowlistToken
+        ? { optionalRequiresAllowlistToken: optionalRequiresAllowlistToken }
+        : {}),
       source: record.source,
       rootDir: record.rootDir,
     });

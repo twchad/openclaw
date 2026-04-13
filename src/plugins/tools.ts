@@ -40,6 +40,7 @@ function isOptionalToolAllowed(params: {
   toolName: string;
   pluginId: string;
   allowlist: Set<string>;
+  optionalRequiresAllowlistToken?: string;
 }): boolean {
   if (params.allowlist.size === 0) {
     return false;
@@ -47,6 +48,16 @@ function isOptionalToolAllowed(params: {
   const toolName = normalizeToolName(params.toolName);
   if (params.allowlist.has(toolName)) {
     return true;
+  }
+  const token = params.optionalRequiresAllowlistToken?.trim();
+  if (token) {
+    const tokenNorm = normalizeToolName(token);
+    if (params.allowlist.has(tokenNorm)) {
+      return true;
+    }
+    // Restricted optional tools: do not unlock via plugin id or `group:plugins`
+    // (those would expose authoring surfaces to the main agent).
+    return false;
   }
   const pluginKey = normalizeToolName(params.pluginId);
   if (params.allowlist.has(pluginKey)) {
@@ -155,6 +166,7 @@ export function resolvePluginTools(params: {
             toolName: tool.name,
             pluginId: entry.pluginId,
             allowlist,
+            optionalRequiresAllowlistToken: entry.optionalRequiresAllowlistToken,
           }),
         )
       : listRaw;

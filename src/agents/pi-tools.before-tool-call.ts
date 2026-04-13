@@ -8,7 +8,7 @@ import { createLazyRuntimeSurface } from "../shared/lazy-runtime.js";
 import { isPlainObject } from "../utils.js";
 import { copyChannelAgentToolMeta } from "./channel-tools.js";
 import { normalizeToolName } from "./tool-policy.js";
-import type { AnyAgentTool } from "./tools/common.js";
+import { type AnyAgentTool, ToolAuthorizationError } from "./tools/common.js";
 import { callGatewayTool } from "./tools/gateway.js";
 
 export type HookContext = {
@@ -383,7 +383,7 @@ export function wrapToolWithBeforeToolCallHook(
         signal,
       });
       if (outcome.blocked) {
-        throw new Error(outcome.reason);
+        throw new ToolAuthorizationError(outcome.reason);
       }
       if (toolCallId) {
         const adjustedParamsKey = buildAdjustedParamsKey({ runId: ctx?.runId, toolCallId });

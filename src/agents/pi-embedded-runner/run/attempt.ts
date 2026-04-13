@@ -496,6 +496,7 @@ export async function runEmbeddedAttempt(
               runAbortController.abort("sessions_yield");
               abortSessionForYield?.();
             },
+            pluginToolAllowlistExtras: params.pluginToolAllowlistExtras,
           });
           if (params.toolsAllow && params.toolsAllow.length > 0) {
             const allowSet = new Set(params.toolsAllow);
