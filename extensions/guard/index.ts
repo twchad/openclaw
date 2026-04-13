@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import { GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN } from "./src/authoring-allowlist-token.js";
 import {
   AuthoringSessionManager,
   registerAuthoringGateway,
@@ -58,6 +59,8 @@ type GuardDecisionResponse = {
   authorized?: boolean;
   wouldAuthorize?: boolean;
   holdId?: string;
+  pendingKnowledgeTest?: boolean;
+  knowledgeTestQuestion?: string;
   violations?: GuardViolation[];
   remediation?: {
     message?: string;
@@ -689,6 +692,10 @@ function bootstrapBlock(
 // ---------------------------------------------------------------------------
 
 function registerAuthoringTools(api: OpenClawPluginApi) {
+  const guardAuthoringToolOpts = {
+    optional: true as const,
+    optionalRequiresAllowlistToken: GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN,
+  };
   // guard_introspect -------------------------------------------------------
   api.registerTool(
     {
@@ -714,7 +721,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, spec: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_validate_rule ----------------------------------------------------
@@ -747,7 +754,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, lint: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_validate_scheme --------------------------------------------------
@@ -781,7 +788,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, lint: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_compile_scheme ---------------------------------------------------
@@ -875,7 +882,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, result: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_scheme_update -----------------------------------------------------
@@ -1015,7 +1022,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, result: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_simulate ---------------------------------------------------------
@@ -1057,7 +1064,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, simulation: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_graph_save -------------------------------------------------------
@@ -1181,7 +1188,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, graph: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_helper_create -----------------------------------------------------
@@ -1269,7 +1276,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult(data);
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_helper_test -------------------------------------------------------
@@ -1302,7 +1309,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult(data);
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_helper_list -------------------------------------------------------
@@ -1325,7 +1332,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult(data);
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_helper_read -------------------------------------------------------
@@ -1359,7 +1366,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult(data);
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_helper_write_file -------------------------------------------------
@@ -1390,7 +1397,7 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult(data);
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
   );
 
   // guard_helper_install_deps -----------------------------------------------
@@ -1419,15 +1426,68 @@ function registerAuthoringTools(api: OpenClawPluginApi) {
         return jsonResult(data);
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardAuthoringToolOpts,
+  );
+
+  // guard_scheme_read -------------------------------------------------------
+  api.registerTool(
+    {
+      name: "guard_scheme_read",
+      label: "Guard Scheme Read",
+      description:
+        "Read the current active Guard authorization scheme for authoring. Optionally filter " +
+        "by intentId to get the scheme for a specific intent. Returns the full scheme with " +
+        "all rules, exceptions, mode, and metadata. Use this to inspect the current scheme " +
+        "before calling guard_scheme_update.",
+      parameters: {
+        type: "object",
+        properties: {
+          intentId: {
+            type: "string",
+            description: "Intent ID to get the scheme for a specific intent.",
+          },
+          schemeId: {
+            type: "string",
+            description: "Scheme ID to read a specific scheme.",
+          },
+        },
+        additionalProperties: false,
+      } as Record<string, unknown>,
+      execute: async (_toolCallId: string, params: unknown) => {
+        const input = (params as { intentId?: string; schemeId?: string }) ?? {};
+        const intentId = typeof input.intentId === "string" ? input.intentId.trim() : "";
+        const schemeId = typeof input.schemeId === "string" ? input.schemeId.trim() : "";
+        let path = "/v1/authoring/scheme";
+        const queryParts: string[] = [];
+        if (schemeId) queryParts.push(`schemeId=${encodeURIComponent(schemeId)}`);
+        else if (intentId) queryParts.push(`intentId=${encodeURIComponent(intentId)}`);
+        if (queryParts.length > 0) path += `?${queryParts.join("&")}`;
+        const data = await guardFetch(api, path, "GET", undefined, {
+          "X-Guard-Role": "author",
+        });
+        if (!data)
+          return jsonResult({ ok: false, error: "No active scheme found or Guard unavailable." });
+        return jsonResult({ ok: true, scheme: data });
+      },
+    } as AnyAgentTool,
+    guardAuthoringToolOpts,
   );
 }
 
 // ---------------------------------------------------------------------------
 // Runtime tools -- always available to the guarded agent
+//
+// SECURITY BOUNDARY: Tools below are visible to the agent being guarded.
+// Authoring tools live in registerAuthoringTools() with
+// optionalRequiresAllowlistToken: group:guard-authoring so `group:plugins` alone
+// does not expose them; only registerRuntimeTools + normal optional policy apply here.
+//
+// Safe for runtime: guard_helper_run, guard_graph_read, guard_graph_list,
+// guard_hold_release, guard_knowledge_test, guard_approval.
 // ---------------------------------------------------------------------------
 
 function registerRuntimeTools(api: OpenClawPluginApi) {
+  const guardRuntimeToolOpts = { optional: true as const };
   // guard_helper_run --------------------------------------------------------
   // Uses the factory pattern so ctx.sessionKey is injected automatically;
   // the LLM never needs to know or pass the opaque session key.
@@ -1462,7 +1522,7 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
           return jsonResult(data);
         },
       }) as AnyAgentTool,
-    { optional: true },
+    guardRuntimeToolOpts,
   );
 
   // guard_graph_read -------------------------------------------------------
@@ -1490,7 +1550,7 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, graph: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardRuntimeToolOpts,
   );
 
   // guard_graph_list --------------------------------------------------------
@@ -1513,43 +1573,55 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, graphs: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardRuntimeToolOpts,
   );
 
-  // guard_scheme_read -------------------------------------------------------
+  // guard_knowledge_test ---------------------------------------------------
   api.registerTool(
-    {
-      name: "guard_scheme_read",
-      label: "Guard Scheme Read",
-      description:
-        "Read the current active Guard authorization scheme. Optionally filter by intentId " +
-        "to get the scheme for a specific intent. Returns the full scheme with all rules, " +
-        "exceptions, mode, and metadata.",
-      parameters: {
-        type: "object",
-        properties: {
-          intentId: {
-            type: "string",
-            description: "Optional intent ID to get the scheme for a specific intent.",
+    (ctx) =>
+      ({
+        name: "guard_knowledge_test",
+        label: "Guard Knowledge Test",
+        description:
+          "Answer a knowledge test to proceed when a tool is blocked by the Guard knowledge test gate.",
+        parameters: {
+          type: "object",
+          properties: {
+            answer: { type: "string", description: "Your answer to the knowledge test question." },
           },
+          required: ["answer"],
+          additionalProperties: false,
+        } as Record<string, unknown>,
+        execute: async (_toolCallId: string, params: unknown) => {
+          const input = params as { answer?: string };
+          if (!input.answer) return jsonResult({ ok: false, error: "answer is required." });
+          const decision = await callGuardDecision(api, {
+            eventType: "ACTION_EVENT",
+            eventId: randomUUID(),
+            occurredAt: new Date().toISOString(),
+            identity: {
+              agentId: ctx.agentId ?? "main",
+              sessionKey: ctx.sessionKey ?? "",
+              sessionId: ctx.sessionKey ?? "",
+            },
+            action: { toolName: "guard_knowledge_test", args: { answer: input.answer } },
+          });
+
+          if (decision.pendingKnowledgeTest) {
+            return jsonResult({
+              ok: false,
+              error: "Knowledge test failed. " + (decision.remediation?.retryHint || "Try again."),
+            });
+          }
+
+          return jsonResult({
+            ok: true,
+            result:
+              "Knowledge test passed. You may now retry the exact same tool call that was blocked.",
+          });
         },
-        additionalProperties: false,
-      } as Record<string, unknown>,
-      execute: async (_toolCallId: string, params: unknown) => {
-        const input = (params as { intentId?: string }) ?? {};
-        const intentId = typeof input.intentId === "string" ? input.intentId.trim() : "";
-        const path = intentId
-          ? `/v1/authoring/scheme?intentId=${encodeURIComponent(intentId)}`
-          : "/v1/authoring/scheme";
-        const data = await guardFetch(api, path, "GET", undefined, {
-          "X-Guard-Role": "author",
-        });
-        if (!data)
-          return jsonResult({ ok: false, error: "No active scheme found or Guard unavailable." });
-        return jsonResult({ ok: true, scheme: data });
-      },
-    } as AnyAgentTool,
-    { optional: true },
+      }) as AnyAgentTool,
+    guardRuntimeToolOpts,
   );
 
   // guard_hold_release -----------------------------------------------------
@@ -1585,7 +1657,7 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, ...(data as HoldReleaseResponse) });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardRuntimeToolOpts,
   );
 
   // guard_hold_status ------------------------------------------------------
@@ -1612,7 +1684,7 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
         return jsonResult({ ok: true, hold: data });
       },
     } as AnyAgentTool,
-    { optional: true },
+    guardRuntimeToolOpts,
   );
 }
 
@@ -1703,6 +1775,22 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
             `or by typing /guard-approve ${holdId} in any OpenClaw channel. ` +
             `Once approved, call guard_hold_release with holdId "${holdId}" to get the frozen request, ` +
             `then retry the EXACT same tool call — Guard will recognize it and allow it through.`,
+        };
+      }
+
+      if (decision.pendingKnowledgeTest) {
+        const violations = (decision.violations ?? [])
+          .map((v) => v.reason)
+          .filter(Boolean)
+          .join("; ");
+
+        return {
+          block: true,
+          blockReason:
+            `Guard knowledge test required — this ${event.toolName} call requires you to prove understanding. ` +
+            `Violations: ${violations || "policy violation detected"}. ` +
+            `Question: "${decision.knowledgeTestQuestion}". ` +
+            `Answer using the guard_knowledge_test tool. Once passed, retry the EXACT same tool call.`,
         };
       }
 

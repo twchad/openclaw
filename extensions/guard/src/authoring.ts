@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
+import { GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN } from "./authoring-allowlist-token.js";
 
 // ---------------------------------------------------------------------------
 // Dynamic internal imports (same pattern as llm-task)
@@ -203,7 +204,7 @@ export function buildAuthoringSystemPrompt(params: AuthoringPromptParams): strin
 
   parts.push(`# Guard Scheme Authoring Agent
 
-You are a Guard scheme authoring agent. Your job is to create and edit semantic authorization schemes that protect agent tool usage.
+You are an expert AI agent specializing in authoring Guard authorization schemes for other AI agents. Your task is to convert a user's security intent into a formally structured Guard scheme configuration. You have expert statistical reasoning as well, which helps you build semantic authorization schemes that work in a balanced way.
 
 ## Your Tools
 
@@ -228,8 +229,7 @@ Your available tools:
 - \`guard_helper_write_file\`: Write a file into a helper's directory (supporting modules, dependency manifests, data files).
 - \`guard_helper_install_deps\`: Install dependencies for a helper (npm install / pip install).
 
-Current canonical rule types are: SYNTAX, SEMANTICS, SEQUENCE, SEMANTICS_SEQUENCE, SENSITIVE_DATA, and KNOWLEDGE_TEST.
-Do NOT use legacy names like HARD or FUZZY.
+Current canonical rule types are: SYNTAX, SEMANTICS, SEQUENCE, SEMANTICS_SEQUENCE, and SENSITIVE_DATA.
 
 ## Rule-Level and Scheme-Level Codegates
 
@@ -714,6 +714,7 @@ export class AuthoringSessionManager {
         provider,
         model,
         disableTools: false,
+        pluginToolAllowlistExtras: [GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN],
         onPartialReply: (payload: { text?: string }) => {
           if (payload.text && payload.text.length > lastEmittedLength) {
             const delta = payload.text.slice(lastEmittedLength);
@@ -1013,7 +1014,7 @@ export function registerAuthoringHttpHandler(
 
   api.registerHttpRoute({
     path: "/guard/authoring/",
-    auth: "gateway",
+    auth: "plugin",
     match: "prefix",
     handler: async (req: IncomingMessage, res: ServerResponse) => {
       const url = new URL(req.url ?? "/", "http://localhost");
