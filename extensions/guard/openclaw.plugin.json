@@ -1,0 +1,63 @@
+{
+  "id": "guard",
+  "name": "Guard",
+  "description": "Semantic authorization adapter for OpenClaw using Guard sidecar.",
+  "enabledByDefault": true,
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": ["hook"]
+  },
+  "contracts": {
+    "tools": [
+      "guard_helper_run",
+      "guard_graph_read",
+      "guard_graph_list",
+      "guard_graph_save",
+      "guard_knowledge_test",
+      "guard_hold_release",
+      "guard_hold_status",
+      "guard_introspect",
+      "guard_simulate",
+      "guard_compile_scheme",
+      "guard_scheme_read",
+      "guard_validate_rule",
+      "guard_validate_scheme",
+      "guard_scheme_get",
+      "guard_scheme_update",
+      "guard_author_confirm",
+      "guard_elaboration_analyze",
+      "guard_query_benign_corpus",
+      "guard_scheme_expand",
+      "guard_helper_create",
+      "guard_helper_list",
+      "guard_helper_read",
+      "guard_helper_write_file",
+      "guard_helper_install_deps",
+      "guard_helper_test"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "endpoint": {
+        "type": "string",
+        "description": "Guard sidecar HTTP endpoint. Defaults to http://127.0.0.1:4517."
+      },
+      "timeoutMs": {
+        "type": "number",
+        "description": "Decision request timeout in milliseconds. Default: 5000."
+      },
+      "mode": {
+        "type": "string",
+        "enum": ["observe", "enforce"],
+        "description": "Operating mode. observe logs but allows; enforce blocks violations."
+      },
+      "failurePolicy": {
+        "type": "string",
+        "enum": ["fail_open", "fail_closed"],
+        "description": "Behavior when Guard sidecar is unreachable. Default: fail_open."
+      }
+    }
+  }
+}

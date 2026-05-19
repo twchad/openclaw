@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/guard",
+  "version": "2026.2.23",
+  "description": "Guard semantic authorization plugin adapter",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

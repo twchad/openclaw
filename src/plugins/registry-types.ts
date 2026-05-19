@@ -75,6 +75,8 @@ export type PluginToolRegistration = {
   names: string[];
   declaredNames?: string[];
   optional: boolean;
+  /** See OpenClawPluginToolOptions.optionalRequiresAllowlistToken. */
+  optionalRequiresAllowlistToken?: string;
   source: string;
   rootDir?: string;
 };

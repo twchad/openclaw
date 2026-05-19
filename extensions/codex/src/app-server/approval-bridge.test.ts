@@ -572,6 +572,46 @@ describe("Codex app-server approval bridge", () => {
     ]);
   });
 
+  it("passes Codex file changes to before_tool_call as apply_patch input", async () => {
+    const params = createParams();
+    mockCallGatewayTool
+      .mockResolvedValueOnce({ id: "plugin:file-approval", status: "accepted" })
+      .mockResolvedValueOnce({ id: "plugin:file-approval", decision: "allow-once" });
+
+    const result = await handleCodexAppServerApprovalRequest({
+      method: "item/fileChange/requestApproval",
+      requestParams: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "patch-normalized",
+        changes: [
+          {
+            path: "src/app.ts",
+            kind: { type: "update" },
+            diff: "@@\n- old\n+ new",
+          },
+        ],
+      },
+      paramsForRun: params,
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+
+    expect(result).toEqual({ decision: "accept" });
+    const hookRequest = mockRunBeforeToolCallHook.mock.calls[0]?.[0];
+    expect(hookRequest?.toolName).toBe("apply_patch");
+    const hookParams = requireRecord(hookRequest?.params, "file change hook params");
+    expect(hookParams.input).toContain("*** Update File: src/app.ts");
+    expect(hookParams.input).toContain("@@\n- old\n+ new");
+    expect(hookParams.changes).toEqual([
+      {
+        path: "src/app.ts",
+        kind: { type: "update" },
+        diff: "@@\n- old\n+ new",
+      },
+    ]);
+  });
+
   it("denies command approvals when OpenClaw tool policy rewrites params", async () => {
     const params = createParams();
     mockRunBeforeToolCallHook.mockResolvedValueOnce({

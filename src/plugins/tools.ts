@@ -143,6 +143,7 @@ function isOptionalToolAllowed(params: {
   toolName: string;
   pluginId: string;
   allowlist: Set<string>;
+  optionalRequiresAllowlistToken?: string;
 }): boolean {
   if (params.allowlist.size === 0) {
     return false;
@@ -153,6 +154,10 @@ function isOptionalToolAllowed(params: {
   const toolName = normalizeToolName(params.toolName);
   if (params.allowlist.has(toolName)) {
     return true;
+  }
+  const token = params.optionalRequiresAllowlistToken?.trim();
+  if (token) {
+    return params.allowlist.has(normalizeToolName(token));
   }
   const pluginKey = normalizeToolName(params.pluginId);
   if (params.allowlist.has(pluginKey)) {
@@ -357,7 +362,11 @@ function listManifestToolNamesForAllowlist(params: {
   if (params.toolNames.length === 0) {
     return [];
   }
-  if (params.allowlist.has("*") || params.allowlist.has("group:plugins")) {
+  if (
+    params.allowlist.has("*") ||
+    params.allowlist.has("group:plugins") ||
+    params.allowlist.has("group:guard-authoring")
+  ) {
     return [...params.toolNames];
   }
   const pluginKey = normalizeToolName(params.pluginId);
@@ -706,6 +715,7 @@ function resolveCachedPluginTools(params: {
           toolName: cachedDescriptor.descriptor.name,
           pluginId: plugin.id,
           allowlist: params.allowlist,
+          optionalRequiresAllowlistToken: cachedDescriptor.optionalRequiresAllowlistToken,
         })
       ) {
         continue;
@@ -1133,9 +1143,46 @@ export function resolvePluginTools(params: {
             toolName: readPluginToolName(tool),
             pluginId: entry.pluginId,
             allowlist,
+            optionalRequiresAllowlistToken: entry.optionalRequiresAllowlistToken,
           }),
         )
       : policyAvailableList;
+
+    // Cache optional descriptors from the full policyAvailableList so a
+    // group:plugins-only resolve cannot hide later group:guard-authoring tools.
+    if (manifestPlugin && entry.optional) {
+      for (const toolRaw of policyAvailableList) {
+        const malformedReason = describeMalformedPluginTool(toolRaw);
+        if (malformedReason) {
+          continue;
+        }
+        const tool = toolRaw as AnyAgentTool;
+        const optional = isPluginToolOptional({
+          entry,
+          manifestPlugin,
+          toolName: tool.name,
+        });
+        const capturedDescriptors = capturedDescriptorsByPluginId.get(entry.pluginId) ?? [];
+        const normalizedName = normalizeToolName(tool.name);
+        if (
+          capturedDescriptors.some((d) => normalizeToolName(d.descriptor.name) === normalizedName)
+        ) {
+          continue;
+        }
+        capturedDescriptors.push(
+          capturePluginToolDescriptor({
+            pluginId: entry.pluginId,
+            tool,
+            optional,
+            ...(entry.optionalRequiresAllowlistToken
+              ? { optionalRequiresAllowlistToken: entry.optionalRequiresAllowlistToken }
+              : {}),
+          }),
+        );
+        capturedDescriptorsByPluginId.set(entry.pluginId, capturedDescriptors);
+      }
+    }
+
     if (list.length === 0) {
       continue;
     }
@@ -1206,6 +1253,9 @@ export function resolvePluginTools(params: {
             pluginId: entry.pluginId,
             tool,
             optional,
+            ...(entry.optionalRequiresAllowlistToken
+              ? { optionalRequiresAllowlistToken: entry.optionalRequiresAllowlistToken }
+              : {}),
           }),
         );
         capturedDescriptorsByPluginId.set(entry.pluginId, capturedDescriptors);

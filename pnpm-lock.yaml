@@ -767,6 +767,12 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/guard:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/googlechat:
     dependencies:
       gaxios:

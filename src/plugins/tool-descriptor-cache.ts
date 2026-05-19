@@ -5,7 +5,7 @@ import type { JsonObject, ToolDescriptor } from "../tools/types.js";
 import type { PluginLoadOptions } from "./loader.js";
 import type { OpenClawPluginToolContext } from "./types.js";
 
-const PLUGIN_TOOL_DESCRIPTOR_CACHE_VERSION = 1;
+const PLUGIN_TOOL_DESCRIPTOR_CACHE_VERSION = 2;
 const PLUGIN_TOOL_DESCRIPTOR_CACHE_LIMIT = 256;
 
 export type CachedPluginToolDescriptor = {
@@ -13,6 +13,8 @@ export type CachedPluginToolDescriptor = {
   displaySummary?: string;
   ownerOnly?: boolean;
   optional: boolean;
+  /** Token (e.g. group:guard-authoring) required in the caller allowlist for this optional tool. */
+  optionalRequiresAllowlistToken?: string;
 };
 
 const descriptorCache = new Map<string, CachedPluginToolDescriptor[]>();
@@ -147,6 +149,7 @@ export function capturePluginToolDescriptor(params: {
   pluginId: string;
   tool: AnyAgentTool;
   optional: boolean;
+  optionalRequiresAllowlistToken?: string;
 }): CachedPluginToolDescriptor {
   const label = (params.tool as { label?: unknown }).label;
   const title = typeof label === "string" && label.trim() ? label.trim() : undefined;
@@ -154,6 +157,9 @@ export function capturePluginToolDescriptor(params: {
     ...(params.tool.displaySummary ? { displaySummary: params.tool.displaySummary } : {}),
     ...(params.tool.ownerOnly === true ? { ownerOnly: true } : {}),
     optional: params.optional,
+    ...(params.optionalRequiresAllowlistToken
+      ? { optionalRequiresAllowlistToken: params.optionalRequiresAllowlistToken }
+      : {}),
     descriptor: {
       name: params.tool.name,
       ...(title ? { title } : {}),

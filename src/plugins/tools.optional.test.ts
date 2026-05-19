@@ -11,6 +11,7 @@ type MockRegistryToolEntry = {
   names: string[];
   declaredNames?: string[];
   factory: (ctx: unknown) => unknown;
+  optionalRequiresAllowlistToken?: string;
 };
 
 const loadOpenClawPluginsMock = vi.fn();
@@ -195,6 +196,50 @@ function resolveWithConflictingCoreName(options?: { suppressNameConflicts?: bool
 
 function setOptionalDemoRegistry() {
   setRegistry([createOptionalDemoEntry()]);
+}
+
+function setGuardLikePluginRegistry() {
+  const registry = createToolRegistry([
+    {
+      pluginId: "guard",
+      optional: true,
+      source: "/tmp/guard-runtime.js",
+      names: ["guard_helper_run"],
+      declaredNames: ["guard_helper_run", "guard_introspect"],
+      factory: () => makeTool("guard_helper_run"),
+    },
+    {
+      pluginId: "guard",
+      optional: true,
+      source: "/tmp/guard-authoring.js",
+      names: ["guard_introspect"],
+      declaredNames: ["guard_helper_run", "guard_introspect"],
+      factory: () => makeTool("guard_introspect"),
+      optionalRequiresAllowlistToken: "group:guard-authoring",
+    },
+  ]);
+  loadOpenClawPluginsMock.mockReturnValue(registry);
+  setActivePluginRegistry?.(registry as never, "test-tool-registry", "gateway-bindable", "/tmp");
+  installToolManifestSnapshots({
+    config: createContext().config,
+    plugins: [
+      {
+        id: "guard",
+        origin: "bundled",
+        enabledByDefault: true,
+        channels: [],
+        providers: [],
+        contracts: {
+          tools: ["guard_helper_run", "guard_introspect"],
+        },
+        toolMetadata: {
+          guard_helper_run: { optional: true },
+          guard_introspect: { optional: true },
+        },
+      },
+    ],
+  });
+  return registry;
 }
 
 function resolveOptionalDemoTools(toolAllowlist?: readonly string[]) {
@@ -1367,6 +1412,38 @@ describe("resolvePluginTools optional tools", () => {
     expect(getPluginToolMeta(first[1])?.optional).toBe(true);
     expect(getPluginToolMeta(second[1])?.optional).toBe(true);
     expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a group:plugins-only resolve poison the cache for group:guard-authoring", () => {
+    setRegistry([
+      {
+        pluginId: "optional-demo",
+        optional: true,
+        source: "/tmp/optional-demo.js",
+        names: ["optional_tool"],
+        factory: () => makeTool("optional_tool"),
+        optionalRequiresAllowlistToken: "group:guard-authoring",
+      },
+    ]);
+    resetPluginToolFactoryCache();
+    expect(resolveOptionalDemoTools(["group:plugins"])).toHaveLength(0);
+    resetPluginToolFactoryCache();
+
+    const tools = resolveOptionalDemoTools(["group:plugins", "group:guard-authoring"]);
+
+    expectResolvedToolNames(tools, ["optional_tool"]);
+  });
+
+  it("keeps Guard authoring tools visible after a runtime-only cache warm", () => {
+    setGuardLikePluginRegistry();
+    resetPluginToolFactoryCache();
+
+    const runtimeOnly = resolveOptionalDemoTools(["group:plugins"]);
+    expectResolvedToolNames(runtimeOnly, ["guard_helper_run"]);
+
+    const afterWarmCache = resolveOptionalDemoTools(["group:plugins", "group:guard-authoring"]);
+
+    expectResolvedToolNames(afterWarmCache, ["guard_helper_run", "guard_introspect"]);
   });
 
   it("rejects plugin id collisions with core tool names", () => {

@@ -16,8 +16,11 @@ vi.mock("../config/runtime-snapshot.js", () => ({
 
 import {
   buildPluginToolDescriptorCacheKey,
+  capturePluginToolDescriptor,
   createPluginToolDescriptorConfigCacheKeyMemo,
+  readCachedPluginToolDescriptors,
   resetPluginToolDescriptorCache,
+  writeCachedPluginToolDescriptors,
 } from "./tool-descriptor-cache.js";
 
 describe("plugin tool descriptor cache keys", () => {
@@ -167,5 +170,35 @@ describe("plugin tool descriptor cache keys", () => {
     });
 
     expect(firstKey).toBe(secondKey);
+  });
+});
+
+describe("plugin tool descriptor cache entries", () => {
+  afterEach(() => {
+    resetPluginToolDescriptorCache();
+  });
+
+  it("persists optionalRequiresAllowlistToken for cache read-time enforcement", () => {
+    const captured = capturePluginToolDescriptor({
+      pluginId: "guard",
+      optional: true,
+      optionalRequiresAllowlistToken: "group:guard-authoring",
+      tool: {
+        name: "guard_introspect",
+        description: "Guard Introspect",
+        parameters: { type: "object", properties: {} },
+        async execute() {
+          return { content: [{ type: "text", text: "ok" }] };
+        },
+      },
+    });
+
+    const cacheKey = "guard-authoring-token-regression";
+    writeCachedPluginToolDescriptors({ cacheKey, descriptors: [captured] });
+    const roundTrip = readCachedPluginToolDescriptors(cacheKey);
+
+    expect(roundTrip).toHaveLength(1);
+    expect(roundTrip?.[0]?.optionalRequiresAllowlistToken).toBe("group:guard-authoring");
+    expect(roundTrip?.[0]?.descriptor.name).toBe("guard_introspect");
   });
 });

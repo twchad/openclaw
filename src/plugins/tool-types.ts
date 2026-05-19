@@ -58,6 +58,7 @@ export type OpenClawPluginToolOptions = {
   name?: string;
   names?: string[];
   optional?: boolean;
+  optionalRequiresAllowlistToken?: string;
 };
 
 export type OpenClawPluginHookOptions = {

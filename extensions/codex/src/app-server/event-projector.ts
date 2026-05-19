@@ -21,6 +21,7 @@ import {
   type ToolProgressDetailMode,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { emitTrustedDiagnosticEvent } from "openclaw/plugin-sdk/diagnostic-runtime";
+import { buildCodexFileChangeEventPayload } from "./file-change-tool-policy.js";
 import { resolveCodexLocalRuntimeAttribution } from "./local-runtime-attribution.js";
 import { CodexNativeSubagentTaskMirror } from "./native-subagent-task-mirror.js";
 import { readCodexTurn } from "./protocol-validators.js";
@@ -1799,9 +1800,7 @@ function itemToolArgs(item: CodexThreadItem): Record<string, unknown> | undefine
     });
   }
   if (item.type === "fileChange") {
-    return sanitizeCodexAgentEventRecord({
-      changes: itemFileChanges(item),
-    });
+    return sanitizeCodexAgentEventRecord(buildCodexFileChangeEventPayload(item.changes));
   }
   if (item.type === "webSearch" && typeof item.query === "string") {
     return sanitizeCodexAgentEventRecord({ query: item.query });
@@ -1826,7 +1825,7 @@ function itemToolResult(item: CodexThreadItem): { result?: Record<string, unknow
     return {
       result: sanitizeCodexAgentEventRecord({
         status: item.status,
-        changes: itemFileChanges(item),
+        ...buildCodexFileChangeEventPayload(item.changes),
       }),
     };
   }

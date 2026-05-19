@@ -10,6 +10,7 @@ import {
   runBeforeToolCallHook,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { formatCodexDisplayText } from "../command-formatters.js";
+import { buildCodexFileChangeToolParams } from "./file-change-tool-policy.js";
 import {
   approvalRequestExplicitlyUnavailable,
   mapExecDecisionToOutcome,
@@ -520,7 +521,7 @@ function buildOpenClawToolPolicyRequest(
     };
   }
   if (method === "item/fileChange/requestApproval") {
-    return { toolName: "apply_patch", params: requestParams ?? {} };
+    return { toolName: "apply_patch", params: buildCodexFileChangeToolParams(requestParams) };
   }
   if (method === "item/permissions/requestApproval") {
     return { toolName: "codex_permission_approval", params: requestParams ?? {} };
