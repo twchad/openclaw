@@ -63,6 +63,23 @@ describe("buildControlUiCspHeader", () => {
     const csp = buildControlUiCspHeader({ inlineScriptHashes: [] });
     expect(csp).toMatch(/script-src 'self'(?:;|$)/);
   });
+
+  it("omits frame-src by default", () => {
+    const csp = buildControlUiCspHeader();
+    expect(csp).not.toContain("frame-src");
+  });
+
+  it("adds frame-src for external embeds without relaxing frame ancestors", () => {
+    const csp = buildControlUiCspHeader({ allowExternalEmbedUrls: true });
+    expect(csp).toContain("frame-src 'self' http: https:");
+    expect(csp).toContain("frame-ancestors 'none'");
+  });
+
+  it("omits frame-src when external embeds are explicitly disabled", () => {
+    const csp = buildControlUiCspHeader({ allowExternalEmbedUrls: false });
+    expect(csp).not.toContain("frame-src");
+    expect(csp).toContain("frame-ancestors 'none'");
+  });
 });
 
 describe("computeInlineScriptHashes", () => {

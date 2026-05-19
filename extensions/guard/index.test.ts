@@ -79,17 +79,23 @@ describe("guard plugin", () => {
     for (const name of GUARD_RUNTIME_TOOL_NAMES) {
       const tool = tools.find((t) => t.name === name);
       expect(tool, `missing runtime tool registration: ${name}`).toBeDefined();
-      expect(tool?.opts).toEqual({ optional: true });
+      expect(tool?.opts).toMatchObject({ optional: true });
+      if (tool?.opts?.name) {
+        expect(tool.opts.name).toBe(name);
+      }
       expect(tool?.opts?.optionalRequiresAllowlistToken).toBeUndefined();
     }
 
     for (const name of GUARD_AUTHORING_ONLY_TOOL_NAMES) {
       const tool = tools.find((t) => t.name === name);
       expect(tool, `missing authoring tool registration: ${name}`).toBeDefined();
-      expect(tool?.opts).toEqual({
+      expect(tool?.opts).toMatchObject({
         optional: true,
         optionalRequiresAllowlistToken: GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN,
       });
+      if (tool?.opts?.name) {
+        expect(tool.opts.name).toBe(name);
+      }
     }
   });
 

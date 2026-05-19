@@ -180,6 +180,7 @@ import { renderDreamingRestartConfirmation } from "./views/dreaming-restart-conf
 import { renderDreaming } from "./views/dreaming.ts";
 import { renderExecApprovalPrompt } from "./views/exec-approval.ts";
 import { renderGatewayUrlConfirmation } from "./views/gateway-url-confirmation.ts";
+import { renderGuard } from "./views/guard.ts";
 import { renderLoginGate } from "./views/login-gate.ts";
 import { renderOverview } from "./views/overview.ts";
 
@@ -1882,7 +1883,9 @@ export function renderApp(state: AppViewState) {
                 ${isChat
                   ? renderChatSessionSelect(state)
                   : html`<div class="page-title">${titleForTab(state.tab)}</div>`}
-                ${isChat ? nothing : html`<div class="page-sub">${subtitleForTab(state.tab)}</div>`}
+                ${isChat || !subtitleForTab(state.tab)
+                  ? nothing
+                  : html`<div class="page-sub">${subtitleForTab(state.tab)}</div>`}
               </div>
               <div class="page-meta">
                 ${state.tab === "dreams"
@@ -2238,6 +2241,12 @@ export function renderApp(state: AppViewState) {
                 },
               }),
             )
+          : nothing}
+        ${state.tab === "guard"
+          ? renderGuard({
+              connected: state.connected,
+              allowExternalEmbedUrls: state.allowExternalEmbedUrls,
+            })
           : nothing}
         ${state.tab === "agents"
           ? renderLazyView(lazyAgents, (m) =>

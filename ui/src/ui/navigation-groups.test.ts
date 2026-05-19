@@ -16,7 +16,7 @@ describe("TAB_GROUPS", () => {
 
   it("keeps channel management out of the primary control sidebar", () => {
     const control = TAB_GROUPS.find((group) => group.label === "control");
-    expect(control?.tabs).toEqual(["overview", "instances", "sessions", "usage", "cron"]);
+    expect(control?.tabs).toEqual(["overview", "instances", "sessions", "usage", "cron", "guard"]);
     expect(SETTINGS_TABS).toContain("channels");
   });
 

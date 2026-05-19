@@ -1061,7 +1061,7 @@ function registerAuthoringTools(api: OpenClawPluginApi, manager: AuthoringSessio
           return jsonResult({ ok: true, ...result });
         },
       }) as AnyAgentTool,
-    guardAuthoringToolOpts,
+    { ...guardAuthoringToolOpts, name: "guard_author_confirm" },
   );
 
   // guard_introspect -------------------------------------------------------
@@ -2191,7 +2191,7 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
           return jsonResult(data);
         },
       }) as AnyAgentTool,
-    guardRuntimeToolOpts,
+    { ...guardRuntimeToolOpts, name: "guard_helper_run" },
   );
 
   // guard_graph_read -------------------------------------------------------
@@ -2298,7 +2298,7 @@ function registerRuntimeTools(api: OpenClawPluginApi) {
           });
         },
       }) as AnyAgentTool,
-    guardRuntimeToolOpts,
+    { ...guardRuntimeToolOpts, name: "guard_knowledge_test" },
   );
 
   // guard_hold_release -----------------------------------------------------

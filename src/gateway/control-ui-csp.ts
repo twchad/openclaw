@@ -32,12 +32,15 @@ function hasScriptSrcAttribute(openTag: string): boolean {
   );
 }
 
-export function buildControlUiCspHeader(opts?: { inlineScriptHashes?: string[] }): string {
+export function buildControlUiCspHeader(opts?: {
+  inlineScriptHashes?: string[];
+  allowExternalEmbedUrls?: boolean;
+}): string {
   const hashes = opts?.inlineScriptHashes;
   const scriptSrc = hashes?.length
     ? `script-src 'self' ${hashes.map((h) => `'${h}'`).join(" ")}`
     : "script-src 'self'";
-  return [
+  const directives = [
     "default-src 'self'",
     "base-uri 'none'",
     "object-src 'none'",
@@ -49,5 +52,9 @@ export function buildControlUiCspHeader(opts?: { inlineScriptHashes?: string[] }
     "font-src 'self' https://fonts.gstatic.com",
     "worker-src 'self'",
     "connect-src 'self' ws: wss: https://api.openai.com https://tweakcn.com",
-  ].join("; ");
+  ];
+  if (opts?.allowExternalEmbedUrls === true) {
+    directives.push("frame-src 'self' http: https:");
+  }
+  return directives.join("; ");
 }
