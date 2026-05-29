@@ -9,8 +9,10 @@ import {
 import {
   AuthoringSessionManager,
   buildAuthoringSystemPrompt,
+  cleanupExpiredGuardSignatureCaptureRuns,
   registerAuthoringGateway,
   registerAuthoringHttpHandler,
+  registerGuardSignatureCaptureRun,
 } from "./src/authoring.js";
 
 type RegisteredTool = {
@@ -35,7 +37,10 @@ describe("guard plugin", () => {
     registerTool: vi.fn((tool: { name?: string } | Function, opts?: Record<string, unknown>) => {
       const resolved =
         typeof tool === "function"
-          ? tool({ sessionKey: "agent:test:guard-authoring-session-1" })
+          ? tool({
+              sessionKey: "agent:test:guard-authoring-session-1",
+              sessionId: "guard-authoring-session-1",
+            })
           : tool;
       tools.push({ name: resolved.name ?? "", opts, tool: resolved });
     }),
@@ -51,6 +56,7 @@ describe("guard plugin", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    cleanupExpiredGuardSignatureCaptureRuns(Number.POSITIVE_INFINITY);
     tools.length = 0;
     for (const key of Object.keys(hooks)) {
       delete hooks[key];
@@ -97,6 +103,42 @@ describe("guard plugin", () => {
         expect(tool.opts.name).toBe(name);
       }
     }
+  });
+
+  it("defaults guard_introspect to generic without an authoring session and forwards explicit context", async () => {
+    registerGuardPlugin(api as any);
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ authoringGuide: { workflow: [] } }), { status: 200 }),
+    );
+
+    const introspect = tools.find((t) => t.name === "guard_introspect")?.tool;
+    await introspect.execute("introspect-1", {});
+    await introspect.execute("introspect-2", { context: "new_scheme" });
+
+    expect(vi.mocked(globalThis.fetch).mock.calls[0]?.[0]).toBe(
+      "http://127.0.0.1:4517/v1/rules/spec?context=generic",
+    );
+    expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[0]).toBe(
+      "http://127.0.0.1:4517/v1/rules/spec?context=new_scheme",
+    );
+  });
+
+  it("passes tool sessionId into authoring scheme boundary checks", async () => {
+    const accessSpy = vi.spyOn(AuthoringSessionManager.prototype, "ensurePermittedSchemeTarget");
+    registerGuardPlugin(api as any);
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ schemeId: "scheme-1" }), { status: 200 }),
+    );
+
+    const readScheme = tools.find((t) => t.name === "guard_scheme_read")?.tool;
+    await readScheme.execute("read", { schemeId: "scheme-1" });
+
+    expect(accessSpy).toHaveBeenCalledWith(
+      "agent:test:guard-authoring-session-1",
+      { schemeId: "scheme-1" },
+      "read",
+      "guard-authoring-session-1",
+    );
   });
 
   it("exposes scheme gate fields for simulation without knowledge-test answers", () => {
@@ -452,6 +494,17 @@ describe("guard plugin", () => {
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
       guardToolNames: ["guard_introspect", "guard_graph_read", "guard_compile_scheme"],
+      guardedToolNames: ["exec"],
+      guardedToolEntries: [
+        {
+          name: "exec",
+          section: "Runtime",
+          description: "Run a command",
+          parameters: { type: "object", properties: { command: { type: "string" } } },
+        },
+      ],
+      ownedSchemeIds: new Set(),
+      ownedIntentIds: new Set(),
       pendingConfirmations: new Map(),
     });
 
@@ -468,6 +521,10 @@ describe("guard plugin", () => {
       toolsAllow: ["guard_introspect", "guard_graph_read", "guard_compile_scheme"],
       bypassAgentToolPolicy: true,
     });
+    const clientTools = runAgent.mock.calls[0]?.[0]?.clientTools as Array<{
+      function?: { name?: string };
+    }>;
+    expect(clientTools.some((tool) => tool.function?.name === "exec")).toBe(true);
     expect(result).toEqual({ text });
     expect(events).toContainEqual({ type: "done", data: { text } });
     expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
@@ -481,6 +538,9 @@ describe("guard plugin", () => {
     });
     expect(createPrompt).toContain("## New Scheme (Create Mode)");
     expect(createPrompt).toContain("creating a new Guard scheme from scratch");
+    expect(createPrompt).toContain("call that tool directly with harmless-shaped arguments");
+    expect(createPrompt).toContain("tool_search may not list capture-only tools");
+    expect(createPrompt).not.toContain("ONLY use guard_* tools");
     expect(createPrompt).not.toContain("## Edit Existing Scheme Mode");
 
     const editWithSchemePrompt = buildAuthoringSystemPrompt({
@@ -534,6 +594,21 @@ describe("guard plugin", () => {
           score: 0.82,
           ruleType: "SEMANTICS",
           violation: "matched benign export",
+          violations: [
+            {
+              ruleId: "rule-1",
+              score: 0.82,
+              ruleType: "SEMANTICS",
+              violation: "matched benign export",
+            },
+            {
+              ruleId: "rule-2",
+              score: 0.12,
+              ruleType: "SEQUENCE",
+              violation: "missing prerequisite",
+              missingSteps: ["guard_helper:backup_before_modify"],
+            },
+          ],
         },
       },
       respond: fpRespond,
@@ -550,6 +625,21 @@ describe("guard plugin", () => {
         score: 0.82,
         ruleType: "SEMANTICS",
         violation: "matched benign export",
+        violations: [
+          {
+            ruleId: "rule-1",
+            score: 0.82,
+            ruleType: "SEMANTICS",
+            violation: "matched benign export",
+          },
+          {
+            ruleId: "rule-2",
+            score: 0.12,
+            ruleType: "SEQUENCE",
+            violation: "missing prerequisite",
+            missingSteps: ["guard_helper:backup_before_modify"],
+          },
+        ],
       },
       fnContext: undefined,
     });
@@ -719,6 +809,164 @@ describe("guard plugin", () => {
     );
     expect(result).toBeUndefined();
     expect(api.logger.warn).toHaveBeenCalledWith(expect.stringContaining("fail-open"));
+  });
+
+  it("captures non-guard authoring tool signatures without executing or calling Guard", async () => {
+    plugin.register(api as any);
+    const unregister = registerGuardSignatureCaptureRun({
+      agentId: "main",
+      sessionId: "guard-authoring-session-1",
+      sessionKey: "agent:main:guard-authoring-session-1",
+      runId: "guard-authoring-run-1",
+      expiresAt: Date.now() + 60_000,
+    });
+
+    const result = await hooks.before_tool_call(
+      {
+        toolName: "mcp:filesystem.write_file",
+        runId: "guard-authoring-run-1",
+        params: {
+          arguments: { path: "README.md", token: "secret-token" },
+          changes: [{ path: "README.md" }],
+        },
+        derivedPaths: ["README.md"],
+      },
+      {
+        agentId: "main",
+        sessionId: "guard-authoring-session-1",
+        sessionKey: "agent:main:guard-authoring-session-1",
+        runId: "guard-authoring-run-1",
+      },
+    );
+
+    unregister();
+    expect(result.block).toBe(true);
+    const payload = JSON.parse(result.blockReason);
+    expect(payload).toMatchObject({
+      type: "guard_signature_capture",
+      executed: false,
+      toolName: "mcp:filesystem.write_file",
+      derivedPaths: ["README.md"],
+    });
+    expect(payload.args.arguments.token).toBe("[REDACTED]");
+    expect(payload.bindableArgPaths).toContain("args.arguments.path");
+    expect(payload.bindableArgPaths).toContain("args.changes");
+    expect(payload.bindableArgPaths).not.toContain("args.changes[0].path");
+    expect(payload.observedArgPaths).toContain("args.changes[0].path");
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("captures apply_patch probes with the real input envelope path", async () => {
+    plugin.register(api as any);
+    const unregister = registerGuardSignatureCaptureRun({
+      agentId: "main",
+      sessionId: "guard-authoring-session-1",
+      sessionKey: "agent:main:guard-authoring-session-1",
+      runId: "guard-authoring-run-1",
+      expiresAt: Date.now() + 60_000,
+    });
+
+    const result = await hooks.before_tool_call(
+      {
+        toolName: "apply_patch",
+        runId: "guard-authoring-run-1",
+        params: {
+          input: "*** Begin Patch\n*** Update File: README.md\n@@\n+probe\n*** End Patch\n",
+        },
+      },
+      {
+        agentId: "main",
+        sessionId: "guard-authoring-session-1",
+        sessionKey: "agent:main:guard-authoring-session-1",
+        runId: "guard-authoring-run-1",
+      },
+    );
+
+    unregister();
+    expect(result.block).toBe(true);
+    const payload = JSON.parse(result.blockReason);
+    expect(payload).toMatchObject({
+      type: "guard_signature_capture",
+      executed: false,
+      toolName: "apply_patch",
+    });
+    expect(payload.bindableArgPaths).toContain("args.input");
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("lets guard tools execute normally during authoring capture runs", async () => {
+    plugin.register(api as any);
+    const unregister = registerGuardSignatureCaptureRun({
+      agentId: "main",
+      sessionId: "guard-authoring-session-1",
+      sessionKey: "agent:main:guard-authoring-session-1",
+      runId: "guard-authoring-run-1",
+      expiresAt: Date.now() + 60_000,
+    });
+
+    const result = await hooks.before_tool_call(
+      { toolName: "guard_helper_run", runId: "guard-authoring-run-1", params: { name: "x" } },
+      {
+        agentId: "main",
+        sessionId: "guard-authoring-session-1",
+        sessionKey: "agent:main:guard-authoring-session-1",
+        runId: "guard-authoring-run-1",
+      },
+    );
+
+    unregister();
+    expect(result).toBeUndefined();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for authoring non-guard tools when capture registration is missing", async () => {
+    plugin.register(api as any);
+
+    const result = await hooks.before_tool_call(
+      { toolName: "exec", runId: "guard-authoring-run-1", params: { command: "echo hi" } },
+      {
+        agentId: "main",
+        sessionId: "guard-authoring-session-1",
+        sessionKey: "agent:main:guard-authoring-session-1",
+        runId: "guard-authoring-run-1",
+      },
+    );
+
+    expect(result.block).toBe(true);
+    const payload = JSON.parse(result.blockReason);
+    expect(payload).toMatchObject({
+      type: "guard_signature_capture_error",
+      executed: false,
+      toolName: "exec",
+    });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not cross-capture a different authoring run identity", async () => {
+    plugin.register(api as any);
+    const unregister = registerGuardSignatureCaptureRun({
+      agentId: "main",
+      sessionId: "guard-authoring-session-1",
+      sessionKey: "agent:main:guard-authoring-session-1",
+      runId: "guard-authoring-run-1",
+      expiresAt: Date.now() + 60_000,
+    });
+
+    const result = await hooks.before_tool_call(
+      { toolName: "exec", runId: "guard-authoring-run-2", params: { command: "echo hi" } },
+      {
+        agentId: "main",
+        sessionId: "guard-authoring-session-1",
+        sessionKey: "agent:main:guard-authoring-session-1",
+        runId: "guard-authoring-run-2",
+      },
+    );
+
+    unregister();
+    expect(result.block).toBe(true);
+    const payload = JSON.parse(result.blockReason);
+    expect(payload.type).toBe("guard_signature_capture_error");
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it("bootstrap-blocks commands that scan for the guard process before killing it", async () => {

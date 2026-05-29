@@ -41,6 +41,137 @@ type ToolCatalogEntry = {
   parameters?: unknown;
 };
 
+type ClientToolDefinition = {
+  type: "function";
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
+};
+
+const CLIENT_TOOL_RESERVED_CAPTURE_NAMES = new Set([
+  "bash",
+  "edit",
+  "find",
+  "grep",
+  "ls",
+  "read",
+  "write",
+]);
+
+export type GuardSignatureCaptureRun = {
+  agentId: string;
+  sessionId: string;
+  sessionKey: string;
+  runId: string;
+  expiresAt: number;
+};
+
+const signatureCaptureRuns = new Map<string, GuardSignatureCaptureRun>();
+
+function signatureCaptureKey(input: {
+  agentId?: string;
+  sessionId?: string;
+  sessionKey?: string;
+  runId?: string;
+}): string | undefined {
+  const agentId = input.agentId?.trim();
+  const sessionId = input.sessionId?.trim();
+  const sessionKey = input.sessionKey?.trim();
+  const runId = input.runId?.trim();
+  if (!agentId || !sessionId || !sessionKey || !runId) {
+    return undefined;
+  }
+  return `${agentId}\u0000${sessionId}\u0000${sessionKey}\u0000${runId}`;
+}
+
+export function registerGuardSignatureCaptureRun(run: GuardSignatureCaptureRun): () => void {
+  cleanupExpiredGuardSignatureCaptureRuns();
+  const key = signatureCaptureKey(run);
+  if (!key) {
+    return () => {};
+  }
+  signatureCaptureRuns.set(key, run);
+  return () => {
+    signatureCaptureRuns.delete(key);
+  };
+}
+
+export function lookupGuardSignatureCaptureRun(input: {
+  agentId?: string;
+  sessionId?: string;
+  sessionKey?: string;
+  runId?: string;
+}): GuardSignatureCaptureRun | undefined {
+  cleanupExpiredGuardSignatureCaptureRuns();
+  const key = signatureCaptureKey(input);
+  if (!key) {
+    return undefined;
+  }
+  const run = signatureCaptureRuns.get(key);
+  if (!run) {
+    return undefined;
+  }
+  if (run.expiresAt <= Date.now()) {
+    signatureCaptureRuns.delete(key);
+    return undefined;
+  }
+  return run;
+}
+
+export function isGuardAuthoringRunIdentity(input: {
+  sessionId?: string;
+  sessionKey?: string;
+  runId?: string;
+}): boolean {
+  return (
+    input.sessionId?.startsWith("guard-authoring-") === true ||
+    input.sessionKey?.includes(":guard-authoring-") === true ||
+    input.runId?.startsWith("guard-authoring-") === true
+  );
+}
+
+export function cleanupExpiredGuardSignatureCaptureRuns(now = Date.now()) {
+  for (const [key, run] of signatureCaptureRuns) {
+    if (run.expiresAt <= now) {
+      signatureCaptureRuns.delete(key);
+    }
+  }
+}
+
+function asParameterSchema(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function permissiveCaptureSchema(): Record<string, unknown> {
+  return { type: "object", properties: {}, additionalProperties: true };
+}
+
+function buildAuthoringCaptureClientTools(
+  catalogEntries: ToolCatalogEntry[],
+): ClientToolDefinition[] {
+  const clientTools: ClientToolDefinition[] = [];
+  const seen = new Set<string>();
+  for (const entry of catalogEntries) {
+    if (CLIENT_TOOL_RESERVED_CAPTURE_NAMES.has(entry.name) || seen.has(entry.name)) {
+      continue;
+    }
+    seen.add(entry.name);
+    clientTools.push({
+      type: "function",
+      function: {
+        name: entry.name,
+        description: `${entry.description}\n\nCapture-only authoring probe. This tool is blocked before execution and returns a guard_signature_capture payload.`,
+        parameters: asParameterSchema(entry.parameters) ?? permissiveCaptureSchema(),
+      },
+    });
+  }
+  return clientTools;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1: Tool Catalog Resolution
 // ---------------------------------------------------------------------------
@@ -64,13 +195,36 @@ export async function resolveAuthoringToolCatalog(
         parameters?: unknown;
       }>;
     };
-    const tools = createOpenClawCodingTools({
-      workspaceDir: api.config?.agents?.defaults?.workspace ?? process.cwd(),
-      config: api.config,
-    });
-    for (const tool of tools) {
-      if (tool.parameters) {
-        coreToolSchemas.set(tool.name, tool.parameters);
+    const workspaceDir = api.config?.agents?.defaults?.workspace ?? process.cwd();
+    const schemaInventoryOptions = [
+      {
+        workspaceDir,
+        config: api.config,
+      },
+      {
+        workspaceDir,
+        config: api.config,
+        modelProvider: "openai",
+        modelId: "gpt-5.4",
+        toolConstructionPlan: {
+          includeBaseCodingTools: true,
+          includeShellTools: true,
+          includeChannelTools: false,
+          includeOpenClawTools: true,
+          includePluginTools: false,
+        },
+      },
+    ];
+    for (const options of schemaInventoryOptions) {
+      try {
+        const tools = createOpenClawCodingTools(options);
+        for (const tool of tools) {
+          if (tool.parameters && !coreToolSchemas.has(tool.name)) {
+            coreToolSchemas.set(tool.name, tool.parameters);
+          }
+        }
+      } catch {
+        // Keep trying other inventory passes.
       }
     }
   } catch {
@@ -215,11 +369,24 @@ type AuthoringMode = "create" | "edit" | "fp_review" | "fn_review";
 type AuthoringFPContext = {
   decisionId: string;
   observation: string;
-  ruleId: string;
   schemeId: string;
-  score: number;
+  violations: AuthoringFPViolation[];
+  ruleId?: string;
+  score?: number;
+  ruleType?: string;
+  violation?: string;
+};
+
+type AuthoringFPViolation = {
+  violationId?: string;
+  ruleId: string;
   ruleType: string;
   violation: string;
+  score: number;
+  expectedAction?: string;
+  missingSteps?: string[];
+  matchedPattern?: string;
+  contentType?: string;
 };
 
 type AuthoringFNContext = {
@@ -233,6 +400,8 @@ type AuthoringFNContext = {
   ruleType: string;
 };
 
+type AuthoringIntrospectionContext = "generic" | "new_scheme" | "edit_existing";
+
 export function buildAuthoringSystemPrompt(params: AuthoringPromptParams): string {
   const parts: string[] = [];
 
@@ -242,7 +411,11 @@ You are an expert AI agent specializing in authoring Guard authorization schemes
 
 ## Your Tools
 
-You can ONLY call guard_* tools. Do NOT call any other tools (no sessions_list, no file tools, no browser tools, etc.). The tool catalog below is reference material showing what tools the GUARDED AGENT has — it is NOT your tool list.
+You can call guard_* tools normally. You may also call non-guard tools from the guarded-agent catalog ONLY as signature probes: during authoring, OpenClaw captures their Guard-visible tool-call shape and does not execute them. Use these probes before writing SEQUENCE requiredInput, requiredOutput, or bindings against uncertain tool arguments.
+
+If a non-guard tool such as apply_patch appears in the tool catalog, call that tool directly with harmless-shaped arguments to capture its signature. Do not use tool_search to discover signature probes; tool_search may not list capture-only tools.
+
+When a non-guard tool probe returns a guard_signature_capture payload, use bindableArgPaths exactly as reported. Do not infer binding paths from tool descriptions, from the visible call method, or from guard_simulate. guard_simulate evaluates caller-supplied GuardDecisionRequest events; it does not discover real OpenClaw tool signatures. If the value you need is not bindable, choose another observed field or create a Guard helper whose attested input/output exposes it.
 
 IMPORTANT: The "Guard Tool Signatures" section below contains the exact JSON parameter schemas for guard_* tools. Follow those schemas exactly when calling tools.
 
@@ -251,11 +424,12 @@ Your available tools:
 - \`guard_graph_list\`: List all existing knowledge graphs. Returns graphId, intentId, intentText for each. Use this to discover available intents when no specific ID is known.
 - \`guard_graph_read\`: Read an existing knowledge graph by graphId. Use this to understand the intent structure before drafting rules.
 - \`guard_graph_save\`: Save a knowledge graph that maps user intent to risk surfaces. Nodes must include stable nodeId values so edges can reference source/target correctly.
-- \`guard_scheme_read\`: Read the current active authorization scheme. Optionally pass an intentId to get the scheme for a specific intent. Use this to review existing rules before editing.
+- \`guard_scheme_read\`: Read a scheme permitted by the current authoring session. In New Scheme mode, this is limited to the scheme created by this session. Use this to review existing rules before editing.
 - \`guard_validate_rule\`: Validate a single rule before adding it to a scheme. Prefer passing rule fields directly at top level (ruleId, ruleType, title, scope, enabled, and the typed config). Fix all errors before proceeding.
 - \`guard_validate_scheme\`: Validate a complete scheme. Pass { rules: [...] }; draft scheme-level gate fields may be included but lint is driven by the rules array.
 - \`guard_simulate\`: Test draft rules against sample events to verify detection accuracy. Test both events that should be blocked AND events that should pass.
 - \`guard_compile_scheme\`: Compile and activate a validated scheme. Only call after validation and simulation pass.
+- \`guard_scheme_update\`: Apply targeted changes to a scheme permitted by the current authoring session. In New Scheme mode, this is limited to the scheme created by this session.
 - \`guard_helper_create\`: Create or update a Guard-managed helper. Each helper is a directory on disk that persists state between runs. Can provide script directly, or set stub:true for complex helpers the user will implement.
 - \`guard_helper_test\`: Test a helper with sample inputs before compiling the scheme. Runs without attestation.
 - \`guard_helper_list\`: List all existing Guard-managed helpers. Use to discover helpers when editing an existing scheme.
@@ -264,7 +438,7 @@ Your available tools:
 - \`guard_helper_install_deps\`: Install dependencies for a helper (npm install / pip install).
 - \`guard_elaboration_analyze\`: Analyze candidate semantic elaborations for cluster health before validation.
 - \`guard_query_benign_corpus\`: Inspect core/held-out benign examples and current per-rule benign corpus additions.
-- \`guard_scheme_expand\`: Apply addition-only updates to an existing scheme.
+- \`guard_scheme_expand\`: Apply addition-only updates to a scheme permitted by the current authoring session.
 
 Optional control tool:
 - \`guard_author_confirm\`: Show a structured confirmation card for a real user decision. This is optional; if a normal prose question is clearer, ask it and end the turn.
@@ -352,7 +526,7 @@ When the helper requires database access, ML models, complex external API integr
 
 ## Important Guidelines
 
-- ONLY use guard_* tools. You do not have access to any other tools.
+- Use guard_* tools for real authoring actions. Non-guard catalog tools are available only as signature probes; calling one captures a guard_signature_capture payload and does not execute the underlying action.
 - Always validate before compiling. Never skip validation.
 - For \`guard_validate_rule\`, pass the rule fields directly at top level. Do not stop if validation fails; read the lint result, fix the rule, and retry.
 - For \`guard_validate_scheme\`, pass a \`rules\` array. Do not treat draft gate fields as validation blockers; compile/update performs gate validation.
@@ -425,7 +599,9 @@ Follow the full workflow: understand intent → call \`guard_introspect\` → bu
 Start by calling \`guard_introspect\` to get the current rule specification, then proceed with tool calls immediately. Do NOT output a JSON payload for the user to "paste" — that is never acceptable. YOU call the tools.
 
 If the user asks to work with an existing intent, graph, or broken scheme, that should be an Edit Existing session, not New Scheme. In New Scheme mode, only ask for an existing graph/intent if the user's request explicitly references one.
-`);
+
+In New Scheme mode, do NOT inspect or mutate ambient existing schemes. After you compile a scheme in this session, you may use guard_scheme_read, guard_scheme_update, and guard_scheme_expand only against that session-created scheme.
+	`);
   }
 
   if (params.mode === "fp_review" && params.fpContext) {
@@ -478,6 +654,14 @@ type AuthoringSession = {
   lastActiveAt: number;
   /** Resolved guard_* tool names for this session, used as the run's toolsAllow. */
   guardToolNames: string[];
+  /** Non-guard tool names visible only for authoring signature capture. */
+  guardedToolNames: string[];
+  /** Non-guard guarded-agent catalog entries used for capture-only fallback tools. */
+  guardedToolEntries: ToolCatalogEntry[];
+  /** Schemes created by this create-mode session and therefore safe to inspect/update. */
+  ownedSchemeIds: Set<string>;
+  /** Intents created by this create-mode session and therefore safe to inspect/update. */
+  ownedIntentIds: Set<string>;
   activeStream?: StreamCallback;
   pendingConfirmations: Map<string, PendingAuthoringConfirmation>;
 };
@@ -604,7 +788,9 @@ export class AuthoringSessionManager {
     const sessionFile = path.join(tempDir, "session.json");
 
     // Resolve tool catalog (guarded agent's tools — NOT guard_* tools, which are function-calling tools)
-    const { formatted: toolCatalog } = await resolveAuthoringToolCatalog(this.api);
+    const { entries: toolCatalogEntries, formatted: toolCatalog } =
+      await resolveAuthoringToolCatalog(this.api);
+    const guardedToolNames = Array.from(new Set(toolCatalogEntries.map((entry) => entry.name)));
 
     // Resolve guard_* tool names so we can pin the run's `toolsAllow` to them
     // (the model never sees coding/exec/etc. tools).
@@ -671,6 +857,10 @@ export class AuthoringSessionManager {
       createdAt: Date.now(),
       lastActiveAt: Date.now(),
       guardToolNames,
+      guardedToolNames,
+      guardedToolEntries: toolCatalogEntries,
+      ownedSchemeIds: new Set(),
+      ownedIntentIds: new Set(),
       pendingConfirmations: new Map(),
     };
 
@@ -737,86 +927,108 @@ export class AuthoringSessionManager {
       finalText: string;
     }> => {
       let lastEmittedLength = 0;
-
-      const result = (await runAgent({
+      const runId = `guard-authoring-${Date.now()}`;
+      const sessionKey = `agent:${this.resolvedAgentId}:${session.sessionId}`;
+      const captureClientTools = buildAuthoringCaptureClientTools(session.guardedToolEntries);
+      const unregisterCapture = registerGuardSignatureCaptureRun({
+        agentId: this.resolvedAgentId,
         sessionId: session.sessionId,
-        sessionKey: `agent:${this.resolvedAgentId}:${session.sessionId}`,
-        sessionFile: session.sessionFile,
-        workspaceDir: this.api.config?.agents?.defaults?.workspace ?? process.cwd(),
-        config: this.api.config,
-        prompt,
-        extraSystemPrompt: systemPrompt,
-        timeoutMs: AUTHORING_TIMEOUT_MS,
-        runId: `guard-authoring-${Date.now()}`,
-        provider,
-        model,
-        disableTools: false,
-        // `group:plugins` covers runtime guard_* tools (gated by the standard
-        // plugin group); the authoring token covers scheme-authoring tools. Both
-        // are needed because some user configs don't surface `group:plugins`
-        // through the global allowlist.
-        pluginToolAllowlistExtras: ["group:plugins", GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN],
-        // Pin the run to guard_* tools only. Combined with bypassAgentToolPolicy
-        // this means the model literally cannot call read/exec/browser or shell
-        // out to claude/codex/cursor CLIs — those tools just aren't on the wire.
-        toolsAllow: session.guardToolNames,
-        // Skip the user-facing tool policy pipeline (tools.profile / tools.allow /
-        // agent.tools.allow). A profile like "coding" — whose allow list contains
-        // only core tool ids — would otherwise strip every guard_* plugin tool
-        // before toolsAllow runs, leaving the model with zero tools.
-        bypassAgentToolPolicy: true,
-        onPartialReply: (payload: { text?: string }) => {
-          if (payload.text && payload.text.length > lastEmittedLength) {
-            const delta = payload.text.slice(lastEmittedLength);
-            lastEmittedLength = payload.text.length;
-            onStream?.({
-              type: "text",
-              data: { text: delta },
-            });
-          }
-        },
-        onAgentEvent: (evt: { stream: string; data: Record<string, unknown> }) => {
-          if (evt.stream !== "tool") {
-            return;
-          }
-          const phase = evt.data.phase as string;
-          const toolName = (evt.data.name as string) ?? "unknown";
-          if (phase === "start") {
-            if (toolName !== "guard_author_confirm") {
-              onStream?.({
-                type: "tool_call",
-                data: { tool: toolName, args: evt.data.args ?? {} },
-              });
-            }
-          } else if (phase === "result") {
-            const isError = evt.data.isError === true;
-            if (toolName !== "guard_author_confirm") {
-              onStream?.({
-                type: "tool_result",
-                data: {
-                  tool: toolName,
-                  result: evt.data.meta ?? {},
-                  isError,
-                },
-              });
-            }
-          }
-        },
-      })) as Record<string, unknown>;
+        sessionKey,
+        runId,
+        expiresAt: Date.now() + AUTHORING_TIMEOUT_MS + 60_000,
+      });
 
-      let finalText = "";
-      const payloads = result.payloads as Array<{ text?: string; isError?: boolean }> | undefined;
-      if (payloads) {
-        finalText = payloads
-          .filter((p) => !p.isError && typeof p.text === "string")
-          .map((p) => p.text ?? "")
-          .join("\n")
-          .trim();
+      try {
+        const result = (await runAgent({
+          sessionId: session.sessionId,
+          sessionKey,
+          sessionFile: session.sessionFile,
+          workspaceDir: this.api.config?.agents?.defaults?.workspace ?? process.cwd(),
+          config: this.api.config,
+          prompt,
+          extraSystemPrompt: systemPrompt,
+          timeoutMs: AUTHORING_TIMEOUT_MS,
+          runId,
+          provider,
+          model,
+          clientTools: captureClientTools,
+          disableTools: false,
+          // `group:plugins` covers runtime guard_* tools (gated by the standard
+          // plugin group); the authoring token covers scheme-authoring tools. Both
+          // are needed because some user configs don't surface `group:plugins`
+          // through the global allowlist.
+          pluginToolAllowlistExtras: ["group:plugins", GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN],
+          // guard_* tools execute normally. Most guarded-agent tools are exposed as
+          // capture-only client tools; reserved names that cannot be registered as
+          // client tools are left in toolsAllow and still blocked by before_tool_call.
+          toolsAllow: Array.from(
+            new Set([
+              ...session.guardToolNames,
+              ...session.guardedToolNames.filter((name) =>
+                CLIENT_TOOL_RESERVED_CAPTURE_NAMES.has(name),
+              ),
+            ]),
+          ),
+          // Skip the user-facing tool policy pipeline (tools.profile / tools.allow /
+          // agent.tools.allow). A profile like "coding" — whose allow list contains
+          // only core tool ids — would otherwise strip every guard_* plugin tool
+          // before toolsAllow runs, leaving the model with zero tools.
+          bypassAgentToolPolicy: true,
+          onPartialReply: (payload: { text?: string }) => {
+            if (payload.text && payload.text.length > lastEmittedLength) {
+              const delta = payload.text.slice(lastEmittedLength);
+              lastEmittedLength = payload.text.length;
+              onStream?.({
+                type: "text",
+                data: { text: delta },
+              });
+            }
+          },
+          onAgentEvent: (evt: { stream: string; data: Record<string, unknown> }) => {
+            if (evt.stream !== "tool") {
+              return;
+            }
+            const phase = evt.data.phase as string;
+            const toolName = (evt.data.name as string) ?? "unknown";
+            if (phase === "start") {
+              if (toolName !== "guard_author_confirm") {
+                onStream?.({
+                  type: "tool_call",
+                  data: { tool: toolName, args: evt.data.args ?? {} },
+                });
+              }
+            } else if (phase === "result") {
+              const isError = evt.data.isError === true;
+              if (toolName !== "guard_author_confirm") {
+                onStream?.({
+                  type: "tool_result",
+                  data: {
+                    tool: toolName,
+                    result: evt.data.meta ?? {},
+                    isError,
+                  },
+                });
+              }
+            }
+          },
+        })) as Record<string, unknown>;
+
+        let finalText = "";
+        const payloads = result.payloads as Array<{ text?: string; isError?: boolean }> | undefined;
+        if (payloads) {
+          finalText = payloads
+            .filter((p) => !p.isError && typeof p.text === "string")
+            .map((p) => p.text ?? "")
+            .join("\n")
+            .trim();
+        }
+
+        return {
+          finalText,
+        };
+      } finally {
+        unregisterCapture();
       }
-
-      return {
-        finalText,
-      };
     };
 
     try {
@@ -931,14 +1143,97 @@ export class AuthoringSessionManager {
     return this.sessions.get(sessionId);
   }
 
-  private findSessionBySessionKey(sessionKey: string | undefined): AuthoringSession | undefined {
+  introspectionContextForSessionKey(
+    sessionKey: string | undefined,
+    explicitContext?: unknown,
+    sessionId?: string,
+  ): AuthoringIntrospectionContext {
+    if (typeof explicitContext === "string" && explicitContext.trim()) {
+      return explicitContext.trim() as AuthoringIntrospectionContext;
+    }
+    const session = this.findSessionBySessionKey(sessionKey, {
+      allowSoleSessionFallback: false,
+      sessionId,
+    });
+    if (!session) {
+      return "generic";
+    }
+    return session.mode === "create" ? "new_scheme" : "edit_existing";
+  }
+
+  ensurePermittedSchemeTarget(
+    sessionKey: string | undefined,
+    target: { schemeId?: unknown; intentId?: unknown },
+    operation: string,
+    sessionId?: string,
+  ): { ok: boolean; error?: string } {
+    const session = this.findSessionBySessionKey(sessionKey, {
+      allowSoleSessionFallback: false,
+      sessionId,
+    });
+    if (!session || session.mode !== "create") {
+      return { ok: true };
+    }
+    const schemeId = typeof target.schemeId === "string" ? target.schemeId.trim() : "";
+    const intentId = typeof target.intentId === "string" ? target.intentId.trim() : "";
+    if (!schemeId && !intentId) {
+      return {
+        ok: false,
+        error: `New Scheme sessions cannot ${operation} ambient existing schemes. Compile a scheme in this session first, or start Edit Existing.`,
+      };
+    }
+    if (
+      (schemeId && session.ownedSchemeIds.has(schemeId)) ||
+      (intentId && session.ownedIntentIds.has(intentId))
+    ) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      error: `New Scheme sessions cannot ${operation} pre-existing schemes. Target only the scheme created by this session, or start Edit Existing.`,
+    };
+  }
+
+  recordOwnedSchemeForSessionKey(
+    sessionKey: string | undefined,
+    target: { schemeId?: unknown; intentId?: unknown },
+    sessionId?: string,
+  ) {
+    const session = this.findSessionBySessionKey(sessionKey, {
+      allowSoleSessionFallback: false,
+      sessionId,
+    });
+    if (!session || session.mode !== "create") {
+      return;
+    }
+    const schemeId = typeof target.schemeId === "string" ? target.schemeId.trim() : "";
+    const intentId = typeof target.intentId === "string" ? target.intentId.trim() : "";
+    if (schemeId) {
+      session.ownedSchemeIds.add(schemeId);
+    }
+    if (intentId) {
+      session.ownedIntentIds.add(intentId);
+    }
+  }
+
+  private findSessionBySessionKey(
+    sessionKey: string | undefined,
+    options?: { allowSoleSessionFallback?: boolean; sessionId?: string },
+  ): AuthoringSession | undefined {
+    const sessionId = typeof options?.sessionId === "string" ? options.sessionId.trim() : "";
+    if (sessionId) {
+      const direct = this.sessions.get(sessionId);
+      if (direct) {
+        return direct;
+      }
+    }
     const key = typeof sessionKey === "string" ? sessionKey : "";
     for (const session of this.sessions.values()) {
       if (key.includes(session.sessionId)) {
         return session;
       }
     }
-    if (this.sessions.size === 1) {
+    if (options?.allowSoleSessionFallback !== false && this.sessions.size === 1) {
       return this.sessions.values().next().value;
     }
     return undefined;
@@ -1062,19 +1357,66 @@ function normalizeFPContext(value: unknown): AuthoringFPContext | undefined {
   if (
     typeof raw.decisionId !== "string" ||
     typeof raw.observation !== "string" ||
-    typeof raw.ruleId !== "string" ||
     typeof raw.schemeId !== "string"
   ) {
     return undefined;
   }
+  const violations = Array.isArray(raw.violations)
+    ? raw.violations.flatMap((item) => {
+        if (!item || typeof item !== "object") {
+          return [];
+        }
+        const v = item as Record<string, unknown>;
+        if (
+          typeof v.ruleId !== "string" ||
+          typeof v.ruleType !== "string" ||
+          typeof v.violation !== "string"
+        ) {
+          return [];
+        }
+        return [
+          {
+            violationId: typeof v.violationId === "string" ? v.violationId : undefined,
+            ruleId: v.ruleId,
+            ruleType: v.ruleType,
+            violation: v.violation,
+            score: typeof v.score === "number" ? v.score : 0,
+            expectedAction: typeof v.expectedAction === "string" ? v.expectedAction : undefined,
+            missingSteps: Array.isArray(v.missingSteps)
+              ? v.missingSteps.filter((step): step is string => typeof step === "string")
+              : undefined,
+            matchedPattern: typeof v.matchedPattern === "string" ? v.matchedPattern : undefined,
+            contentType: typeof v.contentType === "string" ? v.contentType : undefined,
+          },
+        ];
+      })
+    : [];
+  const legacyViolation =
+    typeof raw.ruleId === "string" &&
+    typeof raw.ruleType === "string" &&
+    typeof raw.violation === "string"
+      ? {
+          ruleId: raw.ruleId,
+          ruleType: raw.ruleType,
+          violation: raw.violation,
+          score: typeof raw.score === "number" ? raw.score : 0,
+        }
+      : undefined;
+  const normalizedViolations =
+    violations.length > 0 ? violations : legacyViolation ? [legacyViolation] : [];
+  if (normalizedViolations.length === 0) {
+    return undefined;
+  }
+  const first = normalizedViolations[0];
   return {
     decisionId: raw.decisionId,
     observation: raw.observation,
-    ruleId: raw.ruleId,
     schemeId: raw.schemeId,
-    score: typeof raw.score === "number" ? raw.score : 0,
-    ruleType: typeof raw.ruleType === "string" ? raw.ruleType : "",
-    violation: typeof raw.violation === "string" ? raw.violation : "",
+    violations: normalizedViolations,
+    ruleId: typeof raw.ruleId === "string" ? raw.ruleId : first.ruleId,
+    score: typeof raw.score === "number" ? raw.score : first.score,
+    ruleType: typeof raw.ruleType === "string" ? raw.ruleType : first.ruleType,
+    violation: typeof raw.violation === "string" ? raw.violation : first.violation,
   };
 }
 

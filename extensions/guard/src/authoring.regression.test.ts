@@ -42,7 +42,10 @@ describe("guard authoring tool surface regressions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetPluginToolDescriptorCacheMock.mockClear();
-    resolvePluginToolsMock.mockImplementation(() => mockFullGuardToolSurface());
+    resolvePluginToolsMock.mockImplementation(() => [
+      ...mockFullGuardToolSurface(),
+      makeResolvedTool("file_fetch"),
+    ]);
     globalThis.fetch = vi.fn(async () => ({
       ok: true,
       json: async () => ({}),
@@ -74,9 +77,11 @@ describe("guard authoring tool surface regressions", () => {
   });
 
   it("sendMessage re-resolves guard_* tools and pins toolsAllow on every turn", async () => {
-    const manager = new AuthoringSessionManager(api as never, "http://127.0.0.1:4517") as never;
-    const runAgent = vi.fn(async () => ({ payloads: [{ text: "ok" }] }));
-    manager.runAgent = runAgent;
+    const manager = new AuthoringSessionManager(api as never, "http://127.0.0.1:4517");
+    const runAgent = vi.fn(async (_params: Record<string, unknown>) => ({
+      payloads: [{ text: "ok" }],
+    }));
+    (manager as unknown as { runAgent: typeof runAgent }).runAgent = runAgent;
 
     const { sessionId } = await manager.startSession({ mode: "create" });
 
@@ -92,14 +97,107 @@ describe("guard authoring tool surface regressions", () => {
       }),
     );
 
-    const expectedNames = mockFullGuardToolSurface().map((tool) => tool.name);
+    const expectedGuardNames = mockFullGuardToolSurface().map((tool) => tool.name);
     expect(runAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        toolsAllow: expectedNames,
+        toolsAllow: expect.arrayContaining(expectedGuardNames),
         bypassAgentToolPolicy: true,
         pluginToolAllowlistExtras: ["group:plugins", GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN],
       }),
     );
+    const toolsAllow = runAgent.mock.calls[0]?.[0]?.toolsAllow as string[];
+    expect(toolsAllow.some((name) => !name.startsWith("guard_"))).toBe(true);
+    expect(toolsAllow).not.toContain("exec");
+    expect(toolsAllow).not.toContain("apply_patch");
+    const clientTools = runAgent.mock.calls[0]?.[0]?.clientTools as Array<{
+      function?: { name?: string; parameters?: { properties?: Record<string, unknown> } };
+    }>;
+    expect(clientTools.some((tool) => tool.function?.name === "exec")).toBe(true);
+    expect(clientTools.some((tool) => tool.function?.name === "web_search")).toBe(true);
+    expect(clientTools.some((tool) => tool.function?.name === "apply_patch")).toBe(true);
+    expect(clientTools.some((tool) => tool.function?.name === "file_fetch")).toBe(true);
+    manager.dispose();
+  });
+
+  it("derives introspection context and scopes create-mode scheme access by session ownership", async () => {
+    const manager = new AuthoringSessionManager(api as never, "http://127.0.0.1:4517");
+
+    const create = await manager.startSession({ mode: "create" });
+    const createKey = `agent:test:${create.sessionId}`;
+
+    expect(manager.introspectionContextForSessionKey(undefined)).toBe("generic");
+    expect(manager.introspectionContextForSessionKey(createKey)).toBe("new_scheme");
+    expect(
+      manager.introspectionContextForSessionKey(
+        "agent:test:sandbox-session-key",
+        undefined,
+        create.sessionId,
+      ),
+    ).toBe("new_scheme");
+    expect(manager.ensurePermittedSchemeTarget(createKey, {}, "read")).toMatchObject({
+      ok: false,
+    });
+    expect(
+      manager.ensurePermittedSchemeTarget(
+        "agent:test:sandbox-session-key",
+        {},
+        "read",
+        create.sessionId,
+      ),
+    ).toMatchObject({ ok: false });
+    expect(
+      manager.ensurePermittedSchemeTarget(createKey, { schemeId: "pre-existing" }, "read"),
+    ).toMatchObject({ ok: false });
+    expect(
+      manager.ensurePermittedSchemeTarget(createKey, { intentId: "pre-existing-intent" }, "update"),
+    ).toMatchObject({ ok: false });
+    expect(
+      manager.ensurePermittedSchemeTarget(createKey, { schemeId: "pre-existing" }, "expand"),
+    ).toMatchObject({ ok: false });
+
+    manager.recordOwnedSchemeForSessionKey(createKey, {
+      schemeId: "scheme-1",
+      intentId: "intent-1",
+    });
+    expect(
+      manager.ensurePermittedSchemeTarget(createKey, { schemeId: "scheme-1" }, "read"),
+    ).toEqual({ ok: true });
+    expect(
+      manager.ensurePermittedSchemeTarget(createKey, { intentId: "intent-1" }, "update"),
+    ).toEqual({ ok: true });
+    expect(
+      manager.ensurePermittedSchemeTarget(
+        "agent:test:sandbox-session-key",
+        { schemeId: "scheme-1" },
+        "read",
+        create.sessionId,
+      ),
+    ).toEqual({ ok: true });
+
+    manager.recordOwnedSchemeForSessionKey(
+      "agent:test:sandbox-session-key",
+      {
+        schemeId: "scheme-2",
+      },
+      create.sessionId,
+    );
+    expect(
+      manager.ensurePermittedSchemeTarget(createKey, { schemeId: "scheme-2" }, "expand"),
+    ).toEqual({ ok: true });
+
+    const edit = await manager.startSession({ mode: "edit" });
+    const editKey = `agent:test:${edit.sessionId}`;
+    expect(manager.introspectionContextForSessionKey(editKey)).toBe("edit_existing");
+    expect(manager.ensurePermittedSchemeTarget(editKey, {}, "read")).toEqual({ ok: true });
+
+    const fpReview = await manager.startSession({ mode: "fp_review" });
+    const fpReviewKey = `agent:test:${fpReview.sessionId}`;
+    expect(manager.introspectionContextForSessionKey(fpReviewKey)).toBe("edit_existing");
+
+    const fnReview = await manager.startSession({ mode: "fn_review" });
+    const fnReviewKey = `agent:test:${fnReview.sessionId}`;
+    expect(manager.introspectionContextForSessionKey(fnReviewKey)).toBe("edit_existing");
+
     manager.dispose();
   });
 
