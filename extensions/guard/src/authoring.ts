@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
+import { fetchGuardApi, guardAuthErrorMessage } from "./auth.js";
 import { GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN } from "./authoring-allowlist-token.js";
 
 // ---------------------------------------------------------------------------
@@ -40,25 +41,6 @@ type ToolCatalogEntry = {
   description: string;
   parameters?: unknown;
 };
-
-type ClientToolDefinition = {
-  type: "function";
-  function: {
-    name: string;
-    description?: string;
-    parameters?: Record<string, unknown>;
-  };
-};
-
-const CLIENT_TOOL_RESERVED_CAPTURE_NAMES = new Set([
-  "bash",
-  "edit",
-  "find",
-  "grep",
-  "ls",
-  "read",
-  "write",
-]);
 
 export type GuardSignatureCaptureRun = {
   agentId: string;
@@ -138,38 +120,6 @@ export function cleanupExpiredGuardSignatureCaptureRuns(now = Date.now()) {
       signatureCaptureRuns.delete(key);
     }
   }
-}
-
-function asParameterSchema(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function permissiveCaptureSchema(): Record<string, unknown> {
-  return { type: "object", properties: {}, additionalProperties: true };
-}
-
-function buildAuthoringCaptureClientTools(
-  catalogEntries: ToolCatalogEntry[],
-): ClientToolDefinition[] {
-  const clientTools: ClientToolDefinition[] = [];
-  const seen = new Set<string>();
-  for (const entry of catalogEntries) {
-    if (CLIENT_TOOL_RESERVED_CAPTURE_NAMES.has(entry.name) || seen.has(entry.name)) {
-      continue;
-    }
-    seen.add(entry.name);
-    clientTools.push({
-      type: "function",
-      function: {
-        name: entry.name,
-        description: `${entry.description}\n\nCapture-only authoring probe. This tool is blocked before execution and returns a guard_signature_capture payload.`,
-        parameters: asParameterSchema(entry.parameters) ?? permissiveCaptureSchema(),
-      },
-    });
-  }
-  return clientTools;
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +363,7 @@ You are an expert AI agent specializing in authoring Guard authorization schemes
 
 You can call guard_* tools normally. You may also call non-guard tools from the guarded-agent catalog ONLY as signature probes: during authoring, OpenClaw captures their Guard-visible tool-call shape and does not execute them. Use these probes before writing SEQUENCE requiredInput, requiredOutput, or bindings against uncertain tool arguments.
 
-If a non-guard tool such as apply_patch appears in the tool catalog, call that tool directly with harmless-shaped arguments to capture its signature. Do not use tool_search to discover signature probes; tool_search may not list capture-only tools.
+If a non-guard tool such as apply_patch appears in the tool catalog, call that tool with harmless-shaped arguments to capture its signature. You may call it directly when it is visible, or use tool_search/tool_describe/tool_call when the runtime catalogs it behind Tool Search. Do not infer binding paths from catalog summaries alone.
 
 When a non-guard tool probe returns a guard_signature_capture payload, use bindableArgPaths exactly as reported. Do not infer binding paths from tool descriptions, from the visible call method, or from guard_simulate. guard_simulate evaluates caller-supplied GuardDecisionRequest events; it does not discover real OpenClaw tool signatures. If the value you need is not bindable, choose another observed field or create a Guard helper whose attested input/output exposes it.
 
@@ -656,7 +606,7 @@ type AuthoringSession = {
   guardToolNames: string[];
   /** Non-guard tool names visible only for authoring signature capture. */
   guardedToolNames: string[];
-  /** Non-guard guarded-agent catalog entries used for capture-only fallback tools. */
+  /** Non-guard guarded-agent catalog entries shown in the prompt inventory. */
   guardedToolEntries: ToolCatalogEntry[];
   /** Schemes created by this create-mode session and therefore safe to inspect/update. */
   ownedSchemeIds: Set<string>;
@@ -688,18 +638,33 @@ const AUTHORING_SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const AUTHORING_TIMEOUT_MS = 360_000; // Long enough for one confirmation wait.
 const AUTHORING_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
+const AUTHORING_SESSIONS_KEY = Symbol.for("openclaw.guard.authoring.sessions");
+
+const globalAuthoringState = globalThis as typeof globalThis & {
+  [AUTHORING_SESSIONS_KEY]?: Map<string, AuthoringSession>;
+};
+
+function getGlobalAuthoringSessions(): Map<string, AuthoringSession> {
+  return (
+    globalAuthoringState[AUTHORING_SESSIONS_KEY] ??
+    (globalAuthoringState[AUTHORING_SESSIONS_KEY] = new Map<string, AuthoringSession>())
+  );
+}
 
 export class AuthoringSessionManager {
-  private sessions = new Map<string, AuthoringSession>();
+  private sessions = getGlobalAuthoringSessions();
+  private ownedSessionIds = new Set<string>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private api: OpenClawPluginApi;
   private guardEndpoint: string;
+  private credentialFile: string | undefined;
   private runAgent: RunEmbeddedPiAgentFn | null = null;
   private resolvedAgentId = "main";
 
-  constructor(api: OpenClawPluginApi, guardEndpoint: string) {
+  constructor(api: OpenClawPluginApi, guardEndpoint: string, credentialFile?: string) {
     this.api = api;
     this.guardEndpoint = guardEndpoint;
+    this.credentialFile = credentialFile;
     void this.resolveAgentId();
     this.startCleanup();
   }
@@ -758,16 +723,24 @@ export class AuthoringSessionManager {
     headers?: Record<string, string>,
   ): Promise<unknown> {
     try {
-      const resp = await fetch(`${this.guardEndpoint}${path}`, {
-        method,
-        headers: {
-          ...(body ? { "Content-Type": "application/json" } : {}),
-          ...headers,
+      const resp = await fetchGuardApi(
+        this.api,
+        { endpoint: this.guardEndpoint, timeoutMs: 10_000, credentialFile: this.credentialFile },
+        path,
+        {
+          method,
+          headers: {
+            ...(body ? { "Content-Type": "application/json" } : {}),
+            ...headers,
+          },
+          body: body ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(10_000),
         },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(10_000),
-      });
+      );
       if (!resp.ok) {
+        if (resp.status === 401) {
+          return { error: guardAuthErrorMessage(this.credentialFile) };
+        }
         return null;
       }
       return await resp.json();
@@ -865,6 +838,7 @@ export class AuthoringSessionManager {
     };
 
     this.sessions.set(sessionId, session);
+    this.ownedSessionIds.add(sessionId);
 
     this.api.logger.info(
       `[guard-authoring] session=${sessionId} mode=${params.mode} guard_tools_available=${guardToolNames.length} tools=[${guardToolNames.join(",")}]`,
@@ -929,7 +903,6 @@ export class AuthoringSessionManager {
       let lastEmittedLength = 0;
       const runId = `guard-authoring-${Date.now()}`;
       const sessionKey = `agent:${this.resolvedAgentId}:${session.sessionId}`;
-      const captureClientTools = buildAuthoringCaptureClientTools(session.guardedToolEntries);
       const unregisterCapture = registerGuardSignatureCaptureRun({
         agentId: this.resolvedAgentId,
         sessionId: session.sessionId,
@@ -942,6 +915,7 @@ export class AuthoringSessionManager {
         const result = (await runAgent({
           sessionId: session.sessionId,
           sessionKey,
+          sandboxSessionKey: sessionKey,
           sessionFile: session.sessionFile,
           workspaceDir: this.api.config?.agents?.defaults?.workspace ?? process.cwd(),
           config: this.api.config,
@@ -951,24 +925,17 @@ export class AuthoringSessionManager {
           runId,
           provider,
           model,
-          clientTools: captureClientTools,
           disableTools: false,
           // `group:plugins` covers runtime guard_* tools (gated by the standard
           // plugin group); the authoring token covers scheme-authoring tools. Both
           // are needed because some user configs don't surface `group:plugins`
           // through the global allowlist.
           pluginToolAllowlistExtras: ["group:plugins", GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN],
-          // guard_* tools execute normally. Most guarded-agent tools are exposed as
-          // capture-only client tools; reserved names that cannot be registered as
-          // client tools are left in toolsAllow and still blocked by before_tool_call.
-          toolsAllow: Array.from(
-            new Set([
-              ...session.guardToolNames,
-              ...session.guardedToolNames.filter((name) =>
-                CLIENT_TOOL_RESERVED_CAPTURE_NAMES.has(name),
-              ),
-            ]),
-          ),
+          // guard_* tools execute normally. Non-guard catalog tools are also
+          // materialized so direct calls and Tool Search can reach the
+          // before_tool_call capture boundary; authoring runs fail closed before
+          // executing any non-guard tool.
+          toolsAllow: Array.from(new Set([...session.guardToolNames, ...session.guardedToolNames])),
           // Skip the user-facing tool policy pipeline (tools.profile / tools.allow /
           // agent.tools.allow). A profile like "coding" — whose allow list contains
           // only core tool ids — would otherwise strip every guard_* plugin tool
@@ -1126,6 +1093,7 @@ export class AuthoringSessionManager {
     }
 
     this.sessions.delete(sessionId);
+    this.ownedSessionIds.delete(sessionId);
     for (const pending of session.pendingConfirmations.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error("Authoring session cancelled."));
@@ -1147,12 +1115,13 @@ export class AuthoringSessionManager {
     sessionKey: string | undefined,
     explicitContext?: unknown,
     sessionId?: string,
+    options?: { allowSoleSessionFallback?: boolean },
   ): AuthoringIntrospectionContext {
     if (typeof explicitContext === "string" && explicitContext.trim()) {
       return explicitContext.trim() as AuthoringIntrospectionContext;
     }
     const session = this.findSessionBySessionKey(sessionKey, {
-      allowSoleSessionFallback: false,
+      allowSoleSessionFallback: options?.allowSoleSessionFallback ?? false,
       sessionId,
     });
     if (!session) {
@@ -1166,12 +1135,22 @@ export class AuthoringSessionManager {
     target: { schemeId?: unknown; intentId?: unknown },
     operation: string,
     sessionId?: string,
+    options?: { allowSoleSessionFallback?: boolean; requireSession?: boolean },
   ): { ok: boolean; error?: string } {
     const session = this.findSessionBySessionKey(sessionKey, {
-      allowSoleSessionFallback: false,
+      allowSoleSessionFallback: options?.allowSoleSessionFallback ?? false,
       sessionId,
     });
-    if (!session || session.mode !== "create") {
+    if (!session) {
+      if (options?.requireSession) {
+        return {
+          ok: false,
+          error: `No active Guard authoring session found for ${operation}. Restart the authoring session and try again.`,
+        };
+      }
+      return { ok: true };
+    }
+    if (session.mode !== "create") {
       return { ok: true };
     }
     const schemeId = typeof target.schemeId === "string" ? target.schemeId.trim() : "";
@@ -1198,9 +1177,10 @@ export class AuthoringSessionManager {
     sessionKey: string | undefined,
     target: { schemeId?: unknown; intentId?: unknown },
     sessionId?: string,
+    options?: { allowSoleSessionFallback?: boolean },
   ) {
     const session = this.findSessionBySessionKey(sessionKey, {
-      allowSoleSessionFallback: false,
+      allowSoleSessionFallback: options?.allowSoleSessionFallback ?? false,
       sessionId,
     });
     if (!session || session.mode !== "create") {
@@ -1244,7 +1224,7 @@ export class AuthoringSessionManager {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
-    for (const [id] of this.sessions) {
+    for (const id of this.ownedSessionIds) {
       this.destroySession(id).catch(() => {});
     }
   }

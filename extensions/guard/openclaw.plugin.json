@@ -57,6 +57,10 @@
         "type": "string",
         "enum": ["fail_open", "fail_closed"],
         "description": "Behavior when Guard sidecar is unreachable. Default: fail_open."
+      },
+      "credentialFile": {
+        "type": "string",
+        "description": "Non-secret path to the Guard/OpenClaw runtime credential handoff file. Defaults to ~/.config/guard/runtime/openclaw-client.json."
       }
     }
   }

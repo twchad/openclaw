@@ -1,6 +1,10 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import plugin, { registerGuardPlugin } from "./index.js";
+import { clearGuardAuthCacheForTests } from "./src/auth.js";
 import { GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN } from "./src/authoring-allowlist-token.js";
 import {
   GUARD_AUTHORING_ONLY_TOOL_NAMES,
@@ -67,8 +71,37 @@ describe("guard plugin", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    clearGuardAuthCacheForTests();
     vi.restoreAllMocks();
   });
+
+  async function writeGuardCredential(apiKey: string) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "guard-credential-"));
+    const credentialFile = path.join(dir, "openclaw-client.json");
+    await fs.writeFile(
+      credentialFile,
+      JSON.stringify({
+        version: 1,
+        endpoint: "http://127.0.0.1:4517",
+        header: "X-Guard-API-Key",
+        apiKey,
+        createdAt: "2026-05-29T19:00:00Z",
+        pid: 12345,
+      }),
+      "utf8",
+    );
+    return credentialFile;
+  }
+
+  function withCredentialFile(credentialFile: string) {
+    return {
+      ...api,
+      pluginConfig: {
+        ...api.pluginConfig,
+        credentialFile,
+      },
+    };
+  }
 
   function parseJsonRequestBody(body: RequestInit["body"]): any {
     if (typeof body !== "string") {
@@ -123,6 +156,140 @@ describe("guard plugin", () => {
     );
   });
 
+  it("attaches the handoff API key to guard tool requests", async () => {
+    const credentialFile = await writeGuardCredential("handoff-key");
+    registerGuardPlugin(withCredentialFile(credentialFile) as any);
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ authoringGuide: { workflow: [] } }), { status: 200 }),
+    );
+
+    const introspect = tools.find((t) => t.name === "guard_introspect")?.tool;
+    await introspect.execute("introspect-1", {});
+
+    const [, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({
+      "X-Guard-API-Key": "handoff-key",
+    });
+  });
+
+  it("reloads the handoff credential and retries once after a 401", async () => {
+    const credentialFile = await writeGuardCredential("old-key");
+    registerGuardPlugin(withCredentialFile(credentialFile) as any);
+    vi.mocked(globalThis.fetch)
+      .mockImplementationOnce(async () => {
+        await fs.writeFile(
+          credentialFile,
+          JSON.stringify({
+            version: 1,
+            endpoint: "http://127.0.0.1:4517",
+            header: "X-Guard-API-Key",
+            apiKey: "new-key",
+            createdAt: "2026-05-29T19:01:00Z",
+            pid: 12346,
+          }),
+          "utf8",
+        );
+        return new Response(JSON.stringify({ error: "bad key" }), { status: 401 });
+      })
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ authoringGuide: { workflow: [] } }), { status: 200 }),
+      );
+
+    const introspect = tools.find((t) => t.name === "guard_introspect")?.tool;
+    const result = await introspect.execute("introspect-1", {});
+
+    expect(result.details).toMatchObject({ ok: true });
+    expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-Guard-API-Key": "old-key",
+    });
+    expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[1]?.headers).toMatchObject({
+      "X-Guard-API-Key": "new-key",
+    });
+  });
+
+  it("returns a clear guard tool error when auth is required but no handoff exists", async () => {
+    const credentialFile = path.join(os.tmpdir(), `missing-guard-credential-${Date.now()}.json`);
+    registerGuardPlugin(withCredentialFile(credentialFile) as any);
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ error: "guard API authentication required" }), {
+        status: 401,
+      }),
+    );
+
+    const introspect = tools.find((t) => t.name === "guard_introspect")?.tool;
+    const result = await introspect.execute("introspect-1", {});
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("Guard API authentication failed"),
+    });
+    expect(result.details.error).toContain(credentialFile);
+  });
+
+  it("attaches the handoff API key to hold status and command approval requests", async () => {
+    const credentialFile = await writeGuardCredential("hold-key");
+    registerGuardPlugin(withCredentialFile(credentialFile) as any);
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ holdId: "hold-1", status: "pending" }), { status: 200 }),
+    );
+
+    const holdStatus = tools.find((t) => t.name === "guard_hold_status")?.tool;
+    await holdStatus.execute("hold-status-1", { holdId: "hold-1" });
+
+    const command = vi.mocked(api.registerCommand).mock.calls[0]?.[0] as {
+      handler: (ctx: { args?: string; userId?: string }) => Promise<{ text: string }>;
+    };
+    await command.handler({ args: "hold-1 allow", userId: "test-user" });
+
+    expect(vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-Guard-API-Key": "hold-key",
+    });
+    expect(vi.mocked(globalThis.fetch).mock.calls[1]?.[1]?.headers).toMatchObject({
+      "X-Guard-API-Key": "hold-key",
+    });
+  });
+
+  it("attaches the handoff API key to decision hook requests", async () => {
+    const credentialFile = await writeGuardCredential("decision-key");
+    plugin.register(withCredentialFile(credentialFile) as any);
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ authorized: true }), { status: 200 }),
+    );
+
+    await hooks.before_tool_call(
+      { toolName: "bash", params: { command: "date" } },
+      { agentId: "main", sessionKey: "agent:main:session:s1" },
+    );
+
+    expect(vi.mocked(globalThis.fetch).mock.calls[0]?.[1]?.headers).toMatchObject({
+      "X-Guard-API-Key": "decision-key",
+    });
+  });
+
+  it("attaches the handoff API key to authoring manager Guard fetches", async () => {
+    const credentialFile = await writeGuardCredential("authoring-key");
+    const manager = new AuthoringSessionManager(
+      api as any,
+      "http://127.0.0.1:4517",
+      credentialFile,
+    ) as any;
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ schemeId: "scheme-1" }), { status: 200 }),
+    );
+
+    await manager.guardFetch("/v1/authoring/scheme", "GET", undefined, {
+      "X-Guard-Role": "author",
+    });
+
+    const [, init] = vi.mocked(globalThis.fetch).mock.calls[0];
+    expect((init as RequestInit).headers).toMatchObject({
+      "X-Guard-Role": "author",
+      "X-Guard-API-Key": "authoring-key",
+    });
+    manager.dispose();
+  });
+
   it("passes tool sessionId into authoring scheme boundary checks", async () => {
     const accessSpy = vi.spyOn(AuthoringSessionManager.prototype, "ensurePermittedSchemeTarget");
     registerGuardPlugin(api as any);
@@ -138,6 +305,7 @@ describe("guard plugin", () => {
       { schemeId: "scheme-1" },
       "read",
       "guard-authoring-session-1",
+      { allowSoleSessionFallback: true, requireSession: true },
     );
   });
 
@@ -356,6 +524,9 @@ describe("guard plugin", () => {
   });
 
   it("reports compile/update failures when activation is inactive or lint has errors", async () => {
+    vi.spyOn(AuthoringSessionManager.prototype, "ensurePermittedSchemeTarget").mockReturnValue({
+      ok: true,
+    });
     registerGuardPlugin(api as any);
     const compile = tools.find((t) => t.name === "guard_compile_scheme")?.tool;
     const update = tools.find((t) => t.name === "guard_scheme_update")?.tool;
@@ -393,6 +564,9 @@ describe("guard plugin", () => {
   });
 
   it("routes new authoring tools to their Guard endpoints", async () => {
+    vi.spyOn(AuthoringSessionManager.prototype, "ensurePermittedSchemeTarget").mockReturnValue({
+      ok: true,
+    });
     registerGuardPlugin(api as any);
     vi.mocked(globalThis.fetch).mockResolvedValue(
       new Response(JSON.stringify({ active: true, lint: { issues: [] } }), { status: 200 }),
@@ -518,13 +692,10 @@ describe("guard plugin", () => {
     expect(runAgent).toHaveBeenCalledTimes(1);
     expect(runAgent.mock.calls[0]?.[0]).toMatchObject({
       prompt: "Can you fix the Claude/Codex CLI rule?",
-      toolsAllow: ["guard_introspect", "guard_graph_read", "guard_compile_scheme"],
+      toolsAllow: ["guard_introspect", "guard_graph_read", "guard_compile_scheme", "exec"],
       bypassAgentToolPolicy: true,
     });
-    const clientTools = runAgent.mock.calls[0]?.[0]?.clientTools as Array<{
-      function?: { name?: string };
-    }>;
-    expect(clientTools.some((tool) => tool.function?.name === "exec")).toBe(true);
+    expect(runAgent.mock.calls[0]?.[0]).not.toHaveProperty("clientTools");
     expect(result).toEqual({ text });
     expect(events).toContainEqual({ type: "done", data: { text } });
     expect(events).not.toContainEqual(expect.objectContaining({ type: "error" }));
@@ -538,8 +709,8 @@ describe("guard plugin", () => {
     });
     expect(createPrompt).toContain("## New Scheme (Create Mode)");
     expect(createPrompt).toContain("creating a new Guard scheme from scratch");
-    expect(createPrompt).toContain("call that tool directly with harmless-shaped arguments");
-    expect(createPrompt).toContain("tool_search may not list capture-only tools");
+    expect(createPrompt).toContain("call that tool with harmless-shaped arguments");
+    expect(createPrompt).toContain("use tool_search/tool_describe/tool_call");
     expect(createPrompt).not.toContain("ONLY use guard_* tools");
     expect(createPrompt).not.toContain("## Edit Existing Scheme Mode");
 

@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AnyAgentTool, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
+import {
+  fetchGuardApi,
+  guardAuthErrorMessage,
+  resolveGuardCredentialFile,
+  type GuardHTTPConfig,
+} from "./src/auth.js";
 import { GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN } from "./src/authoring-allowlist-token.js";
 import {
   AuthoringSessionManager,
@@ -22,6 +28,7 @@ type GuardPluginConfig = {
   timeoutMs?: number;
   mode?: "observe" | "enforce";
   failurePolicy?: "fail_open" | "fail_closed";
+  credentialFile?: string;
 };
 
 type GuardDecisionRequest = {
@@ -85,10 +92,9 @@ type HoldReleaseResponse = {
   frozenRequest?: unknown;
 };
 
-function resolveConfig(
-  api: OpenClawPluginApi,
-): Required<Pick<GuardPluginConfig, "endpoint" | "timeoutMs">> &
-  Pick<GuardPluginConfig, "failurePolicy"> {
+type ResolvedGuardConfig = GuardHTTPConfig & Pick<GuardPluginConfig, "failurePolicy">;
+
+function resolveConfig(api: OpenClawPluginApi): ResolvedGuardConfig {
   const cfg = (api.pluginConfig ?? {}) as GuardPluginConfig;
   const endpoint = (cfg.endpoint ?? process.env.GUARD_ENDPOINT ?? "http://127.0.0.1:4517").replace(
     /\/$/,
@@ -100,7 +106,8 @@ function resolveConfig(
     cfg.failurePolicy === "fail_closed" || process.env.GUARD_FAILURE_POLICY === "fail_closed"
       ? "fail_closed"
       : "fail_open";
-  return { endpoint, timeoutMs, failurePolicy };
+  const credentialFile = resolveGuardCredentialFile(cfg.credentialFile);
+  return { endpoint, timeoutMs, failurePolicy, credentialFile };
 }
 
 async function guardFetch(
@@ -113,7 +120,7 @@ async function guardFetch(
   const cfg = resolveConfig(api);
   const signal = AbortSignal.timeout(cfg.timeoutMs);
   try {
-    const resp = await fetch(`${cfg.endpoint}${path}`, {
+    const resp = await fetchGuardApi(api, cfg, path, {
       method,
       headers: {
         ...(body ? { "Content-Type": "application/json" } : {}),
@@ -123,6 +130,9 @@ async function guardFetch(
       signal,
     });
     if (!resp.ok) {
+      if (resp.status === 401) {
+        return { error: guardAuthErrorMessage(cfg.credentialFile) };
+      }
       // 4xx = client error (validation failure, not found, etc.) — return the
       // response body so callers surface the real error instead of "Guard unavailable."
       if (resp.status >= 400 && resp.status < 500) {
@@ -147,7 +157,7 @@ async function callGuardDecision(
   const cfg = resolveConfig(api);
   const signal = AbortSignal.timeout(cfg.timeoutMs);
   try {
-    const resp = await fetch(`${cfg.endpoint}/v1/decision`, {
+    const resp = await fetchGuardApi(api, cfg, "/v1/decision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
@@ -1197,6 +1207,7 @@ function registerAuthoringTools(api: OpenClawPluginApi, manager: AuthoringSessio
             ctx.sessionKey,
             input.context,
             ctx.sessionId,
+            { allowSoleSessionFallback: true },
           );
           const data = await guardFetch(
             api,
@@ -1456,6 +1467,7 @@ function registerAuthoringTools(api: OpenClawPluginApi, manager: AuthoringSessio
               intentId: input.intentId,
             },
             ctx.sessionId,
+            { allowSoleSessionFallback: true },
           );
           return jsonResult({ ok: true, result: data });
         },
@@ -1613,6 +1625,7 @@ function registerAuthoringTools(api: OpenClawPluginApi, manager: AuthoringSessio
             input,
             "update",
             ctx.sessionId,
+            { allowSoleSessionFallback: true, requireSession: true },
           );
           if (!access.ok) {
             return jsonResult({ ok: false, error: access.error });
@@ -1635,6 +1648,7 @@ function registerAuthoringTools(api: OpenClawPluginApi, manager: AuthoringSessio
               intentId: input.intentId,
             },
             ctx.sessionId,
+            { allowSoleSessionFallback: true },
           );
           return jsonResult({ ok: true, result: data });
         },
@@ -1864,6 +1878,7 @@ function registerAuthoringTools(api: OpenClawPluginApi, manager: AuthoringSessio
             input,
             "expand",
             ctx.sessionId,
+            { allowSoleSessionFallback: true, requireSession: true },
           );
           if (!access.ok) {
             return jsonResult({ ok: false, error: access.error });
@@ -2298,6 +2313,7 @@ function registerAuthoringTools(api: OpenClawPluginApi, manager: AuthoringSessio
             input,
             "read",
             ctx.sessionId,
+            { allowSoleSessionFallback: true, requireSession: true },
           );
           if (!access.ok) {
             return jsonResult({ ok: false, error: access.error });
@@ -2573,7 +2589,7 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
 
   // Authoring session manager + gateway methods + HTTP routes
   const cfg = resolveConfig(api);
-  const authoringManager = new AuthoringSessionManager(api, cfg.endpoint);
+  const authoringManager = new AuthoringSessionManager(api, cfg.endpoint, cfg.credentialFile);
   registerAuthoringTools(api, authoringManager);
   registerAuthoringGateway(api, authoringManager);
   registerAuthoringHttpHandler(api, authoringManager);
@@ -2779,12 +2795,15 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
     const cfg = resolveConfig(api);
     const action = decision === "allow" ? "approve" : "deny";
     try {
-      await fetch(`${cfg.endpoint}/v1/holds/${holdId}/${action}`, {
+      const resp = await fetchGuardApi(api, cfg, `/v1/holds/${holdId}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ approvedBy: resolvedBy }),
         signal: AbortSignal.timeout(cfg.timeoutMs),
       });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
     } catch (err) {
       api.logger.warn?.(`guard: sidecar hold ${action} failed: ${String(err)}`);
     }
@@ -2815,7 +2834,7 @@ export function registerGuardPlugin(api: OpenClawPluginApi) {
       const cfg = resolveConfig(api);
       const action = decision === "allow" ? "approve" : "deny";
       try {
-        const resp = await fetch(`${cfg.endpoint}/v1/holds/${holdId}/${action}`, {
+        const resp = await fetchGuardApi(api, cfg, `/v1/holds/${holdId}/${action}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

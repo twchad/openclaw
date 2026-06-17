@@ -105,17 +105,17 @@ describe("guard authoring tool surface regressions", () => {
         pluginToolAllowlistExtras: ["group:plugins", GUARD_AUTHORING_PLUGIN_ALLOWLIST_TOKEN],
       }),
     );
-    const toolsAllow = runAgent.mock.calls[0]?.[0]?.toolsAllow as string[];
+    const runParams = runAgent.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(runParams.sessionId).toBe(sessionId);
+    expect(String(runParams.sessionKey)).toContain(sessionId);
+    expect(runParams.sandboxSessionKey).toBe(runParams.sessionKey);
+    const toolsAllow = runParams.toolsAllow as string[];
     expect(toolsAllow.some((name) => !name.startsWith("guard_"))).toBe(true);
-    expect(toolsAllow).not.toContain("exec");
-    expect(toolsAllow).not.toContain("apply_patch");
-    const clientTools = runAgent.mock.calls[0]?.[0]?.clientTools as Array<{
-      function?: { name?: string; parameters?: { properties?: Record<string, unknown> } };
-    }>;
-    expect(clientTools.some((tool) => tool.function?.name === "exec")).toBe(true);
-    expect(clientTools.some((tool) => tool.function?.name === "web_search")).toBe(true);
-    expect(clientTools.some((tool) => tool.function?.name === "apply_patch")).toBe(true);
-    expect(clientTools.some((tool) => tool.function?.name === "file_fetch")).toBe(true);
+    expect(toolsAllow).toContain("exec");
+    expect(toolsAllow).toContain("web_search");
+    expect(toolsAllow).toContain("apply_patch");
+    expect(toolsAllow).toContain("file_fetch");
+    expect(runAgent.mock.calls[0]?.[0]).not.toHaveProperty("clientTools");
     manager.dispose();
   });
 
@@ -124,8 +124,14 @@ describe("guard authoring tool surface regressions", () => {
 
     const create = await manager.startSession({ mode: "create" });
     const createKey = `agent:test:${create.sessionId}`;
+    const deferredToolManager = new AuthoringSessionManager(api as never, "http://127.0.0.1:4517");
 
     expect(manager.introspectionContextForSessionKey(undefined)).toBe("generic");
+    expect(
+      manager.introspectionContextForSessionKey(undefined, undefined, undefined, {
+        allowSoleSessionFallback: true,
+      }),
+    ).toBe("new_scheme");
     expect(manager.introspectionContextForSessionKey(createKey)).toBe("new_scheme");
     expect(
       manager.introspectionContextForSessionKey(
@@ -134,8 +140,38 @@ describe("guard authoring tool surface regressions", () => {
         create.sessionId,
       ),
     ).toBe("new_scheme");
+    expect(
+      deferredToolManager.introspectionContextForSessionKey(undefined, undefined, create.sessionId),
+    ).toBe("new_scheme");
+    expect(
+      deferredToolManager.ensurePermittedSchemeTarget(undefined, {}, "read", create.sessionId, {
+        requireSession: true,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("ambient existing schemes"),
+    });
+    deferredToolManager.dispose();
+    expect(manager.getSession(create.sessionId)).toBeDefined();
     expect(manager.ensurePermittedSchemeTarget(createKey, {}, "read")).toMatchObject({
       ok: false,
+    });
+    expect(
+      manager.ensurePermittedSchemeTarget(undefined, {}, "read", undefined, {
+        allowSoleSessionFallback: true,
+        requireSession: true,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("ambient existing schemes"),
+    });
+    expect(
+      manager.ensurePermittedSchemeTarget("agent:test:missing-session", {}, "read", undefined, {
+        requireSession: true,
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("No active Guard authoring session"),
     });
     expect(
       manager.ensurePermittedSchemeTarget(
@@ -172,6 +208,12 @@ describe("guard authoring tool surface regressions", () => {
         "read",
         create.sessionId,
       ),
+    ).toEqual({ ok: true });
+    manager.recordOwnedSchemeForSessionKey(undefined, { schemeId: "scheme-fallback" }, undefined, {
+      allowSoleSessionFallback: true,
+    });
+    expect(
+      manager.ensurePermittedSchemeTarget(createKey, { schemeId: "scheme-fallback" }, "read"),
     ).toEqual({ ok: true });
 
     manager.recordOwnedSchemeForSessionKey(
